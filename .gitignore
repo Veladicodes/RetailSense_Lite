@@ -1,0 +1,15 @@
+# Ignore big data & model outputs
+data/raw/*
+outputs/*
+__pycache__/
+*.pyc
+*.pkl
+*.h5
+*.csv
+*.xlsx
+*.zip
+*.tar.gz
+.env
+.DS_Store
+.vscode/
+.idea/
