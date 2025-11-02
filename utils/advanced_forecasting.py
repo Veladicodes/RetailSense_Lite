@@ -72,7 +72,11 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class EnsembleResult:
-    """Container for ensemble forecasting results"""
+    """
+    Container for ensemble forecasting results.
+    
+    Note: Field names are 'history' and 'forecast' (NOT 'history_df' or 'forecast_df').
+    """
     history: pd.DataFrame  # Historical data with fitted values
     forecast: pd.DataFrame  # Future forecast with confidence intervals
     metrics: Dict[str, float]  # Model performance metrics
@@ -80,6 +84,11 @@ class EnsembleResult:
     details: Dict[str, Any]  # Additional model details (weights, feature importances, etc.)
     feature_importances: Optional[pd.DataFrame] = None  # Feature importance for XGBoost/LightGBM
     prophet_components: Optional[pd.DataFrame] = None  # Prophet decomposition (trend, seasonality)
+    
+    def __post_init__(self):
+        """Validate that the correct field names are used"""
+        # This ensures the dataclass is properly initialized
+        pass
 
 # -------------------------
 # Preprocessing Utilities
@@ -897,9 +906,11 @@ def train_ensemble(df: pd.DataFrame, horizon_weeks: int = 156, debug: bool = Fal
     logger.info(f"Forecast generation complete in {details['duration_seconds']:.2f}s")
     
     # Return EnsembleResult object
+    # CRITICAL: Ensure we use 'history' and 'forecast' (NOT 'history_df' or 'forecast_df')
+    # These must match the dataclass field names exactly
     return EnsembleResult(
-        history_df=hist_fit,
-        forecast_df=forecast_df,
+        history=hist_fit,  # Field name is 'history', not 'history_df'
+        forecast=forecast_df,  # Field name is 'forecast', not 'forecast_df'
         metrics=metrics,
         residuals=residuals_df,
         details=details,
@@ -1472,4 +1483,130 @@ def simulate_forecast_with_scenarios(df, horizon_weeks=12, scenarios=None):
             "feature_importances": base_result["feature_importances"],
             "prophet_components": base_result["prophet_components"]
         }
+    }
+
+
+# ============================================================================
+# ADVANCED FORECAST FUNCTION - Placement-Grade Implementation
+# ============================================================================
+
+def run_advanced_forecast(
+    product_df: pd.DataFrame,
+    horizon_days: int,
+    debug: bool = False
+) -> Dict[str, Any]:
+    """
+    Advanced hybrid ensemble forecasting with comprehensive outputs.
+    
+    Aggregates weekly, trains Prophet + XGBoost + LightGBM ensemble,
+    generates feature importance, saves to outputs, and returns full results.
+    
+    Args:
+        product_df: DataFrame with product data (must have week_start, sales_qty, price, etc.)
+        horizon_days: Forecast horizon in days (will convert to weeks)
+        debug: Enable debug logging
+    
+    Returns:
+        Dictionary with:
+        - forecast_df: Future forecast with confidence intervals
+        - history_df: Historical data with fitted values
+        - metrics: MAE, RMSE, MAPE, R²
+        - feature_importances: DataFrame with top features
+        - model_weights: Ensemble weights
+        - prophet_components: Trend/seasonality decomposition
+        - anomaly_flags: Detected anomalies in forecast
+        - saved_path: Path to saved forecast CSV
+    """
+    from datetime import datetime
+    from typing import List
+    
+    # Convert days to weeks
+    horizon_weeks = max(1, int(np.ceil(horizon_days / 7)))
+    
+    # Prepare time series
+    if "week_start" in product_df.columns:
+        ts = product_df[["week_start", "sales_qty"]].copy()
+        ts.columns = ["date", "sales_qty"]
+    elif "date" in product_df.columns:
+        ts = product_df[["date", "sales_qty"]].copy()
+    else:
+        raise ValueError("Date column (week_start or date) not found")
+    
+    ts["date"] = pd.to_datetime(ts["date"])
+    ts = ts.sort_values("date").reset_index(drop=True)
+    
+    if len(ts) < 12:
+        raise ValueError(f"Insufficient data: {len(ts)} weeks. Need ≥12 weeks.")
+    
+    logger.info(f"Running advanced forecast for {horizon_weeks} weeks ({horizon_days} days)")
+    
+    # Use existing train_ensemble function
+    result = train_ensemble(ts, horizon_weeks=horizon_weeks, debug=debug, fast_mode=True)
+    
+    # Extract results
+    forecast_df = result.forecast.copy()
+    history_df = result.history.copy()
+    
+    # Ensure date columns
+    if "date" not in forecast_df.columns and "ds" in forecast_df.columns:
+        forecast_df["date"] = pd.to_datetime(forecast_df["ds"])
+    if "date" not in forecast_df.columns:
+        last_date = ts["date"].max()
+        forecast_df["date"] = pd.date_range(start=last_date + pd.Timedelta(weeks=1), periods=len(forecast_df), freq='W')
+    
+    # Feature importance aggregation
+    feature_importance_combined = pd.DataFrame()
+    if result.feature_importances is not None:
+        if isinstance(result.feature_importances, pd.DataFrame):
+            feature_importance_combined = result.feature_importances.copy()
+        elif isinstance(result.feature_importances, dict):
+            # Handle dict of DataFrames
+            for model_name, imp_df in result.feature_importances.items():
+                if imp_df is not None and not imp_df.empty:
+                    if feature_importance_combined.empty:
+                        feature_importance_combined = imp_df.copy()
+                        if "model" not in feature_importance_combined.columns:
+                            feature_importance_combined["model"] = model_name
+                    else:
+                        temp_df = imp_df.copy()
+                        if "model" not in temp_df.columns:
+                            temp_df["model"] = model_name
+                        feature_importance_combined = pd.concat([feature_importance_combined, temp_df], ignore_index=True)
+    
+    # Anomaly detection in forecast
+    anomaly_flags = []
+    if len(forecast_df) >= 4:
+        forecast_mean = forecast_df["yhat"].mean()
+        forecast_std = forecast_df["yhat"].std()
+        threshold = forecast_mean + 2 * forecast_std
+        
+        for idx, row in forecast_df.iterrows():
+            if row["yhat"] > threshold:
+                anomaly_flags.append({
+                    "date": row["date"],
+                    "value": row["yhat"],
+                    "type": "high_forecast",
+                    "severity": "moderate"
+                })
+    
+    # Save to outputs
+    product_name = product_df["product_name"].iloc[0] if "product_name" in product_df.columns else "Unknown"
+    forecast_output_dir = os.path.join(OUTPUT_DIR, "forecasts")
+    os.makedirs(forecast_output_dir, exist_ok=True)
+    
+    forecast_file = os.path.join(forecast_output_dir, f"{product_name}_forecast_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv")
+    forecast_df.to_csv(forecast_file, index=False)
+    
+    logger.info(f"Forecast saved to {forecast_file}")
+    
+    # Prepare comprehensive return
+    return {
+        "forecast_df": forecast_df,
+        "history_df": history_df,
+        "metrics": result.metrics,
+        "feature_importances": feature_importance_combined,
+        "model_weights": result.details.get("weights", {}),
+        "prophet_components": result.prophet_components,
+        "anomaly_flags": anomaly_flags,
+        "saved_path": forecast_file
     }

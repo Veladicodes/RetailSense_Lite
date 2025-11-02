@@ -19,6 +19,18 @@ try:
 except Exception:
     pass
 
+# Ensure required directories exist
+required_dirs = [
+    os.path.join("data", "processed"),
+    os.path.join("data", "uploaded"),
+    os.path.join("data", "predictions"),
+    "outputs",
+    "notebooks"
+]
+
+for directory in required_dirs:
+    os.makedirs(os.path.join(os.path.dirname(os.path.abspath(__file__)), directory), exist_ok=True)
+
 # -------------------------------
 # Step 1: Check requirements
 # -------------------------------

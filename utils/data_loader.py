@@ -1,6 +1,7 @@
 
 import pandas as pd
 import numpy as np
+import os
 from datetime import datetime
 import warnings
 warnings.filterwarnings('ignore')
@@ -25,7 +26,46 @@ class RetailDataLoader:
     def load_data(self):
         """Load and perform initial data cleaning"""
         print("📥 Loading retail data...")
-        self.df = pd.read_csv(self.file_path)
+        try:
+            self.df = pd.read_csv(self.file_path)
+            return True
+        except Exception as e:
+            print(f"Error loading data: {e}")
+            return False
+
+
+def load_dataset(file_path):
+    """Load dataset from file path with error handling"""
+    try:
+        if not os.path.exists(file_path):
+            return None
+        return pd.read_csv(file_path)
+    except Exception as e:
+        print(f"Error loading dataset from {file_path}: {e}")
+        return None
+
+
+def preprocess_data(df):
+    """Preprocess data for analysis and forecasting"""
+    if df is None or df.empty:
+        return None
+        
+    try:
+        # Convert date columns
+        date_cols = [col for col in df.columns if 'date' in col.lower() or 'week' in col.lower()]
+        for col in date_cols:
+            if col in df.columns:
+                df[col] = pd.to_datetime(df[col], errors='coerce')
+                
+        # Handle missing values
+        numeric_cols = df.select_dtypes(include=['number']).columns
+        for col in numeric_cols:
+            df[col] = df[col].fillna(df[col].median())
+            
+        return df
+    except Exception as e:
+        print(f"Error preprocessing data: {e}")
+        return df
 
         # Convert date columns
         self.df['week_start'] = pd.to_datetime(self.df['week_start'], errors='coerce')
