@@ -381,4 +381,3 @@ def generate_executive_summary(
     summary += f"3. Implement dynamic pricing for top {min(5, len(pricing_opportunities))} high-opportunity products\n"
     
     return summary
-

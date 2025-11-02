@@ -14,7 +14,7 @@ from sklearn.metrics import mean_absolute_error, mean_squared_error
 from statsmodels.tsa.seasonal import STL
 from prophet import Prophet
 import io
-from utils.advanced_forecasting import train_ensemble, train_ensemble_for_app
+from utils.advanced_forecasting import train_ensemble, train_ensemble_for_app, run_hybrid_forecast, simulate_forecast_with_scenarios
 from utils.business_insights import (
     detect_sales_anomalies, generate_inventory_alerts, analyze_seasonality,
     calculate_price_elasticity, analyze_pricing_opportunities, optimize_price,
@@ -36,6 +36,9 @@ if "pipeline_success" not in st.session_state:
     st.session_state["pipeline_success"] = False
 if "force_sales_tab" not in st.session_state:
     st.session_state["force_sales_tab"] = False
+# Add a session state variable to maintain tab selection after product selection
+if "current_tab" not in st.session_state:
+    st.session_state["current_tab"] = "Home"
 
 # -------------------------------
 # Utility Functions
@@ -723,7 +726,30 @@ else:
 # -------------------------------
 # Tabs
 # -------------------------------
-tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8 = st.tabs([
+# Store the current tab in session state when it changes
+def on_tab_change(tab_name):
+    st.session_state["current_tab"] = tab_name
+
+# Get the tab index based on the current_tab in session state
+def get_tab_index():
+    tab_names = [
+        "Executive Summary",
+        "Sales Forecasting",
+        "Sales Anomalies",
+        "Inventory Alerts",
+        "Seasonal Insights",
+        "Pricing Opportunities",
+        "Dynamic Pricing Engine",
+        "Data Summary"
+    ]
+    current_tab = st.session_state.get("current_tab", "Home")
+    try:
+        return tab_names.index(current_tab)
+    except ValueError:
+        return 0  # Default to first tab if not found
+
+# Use the stored tab index or default to the first tab
+tab_names = [
     "📊 Executive Summary",
     "📈 Sales Forecasting",
     "🚨 Sales Anomalies",
@@ -732,7 +758,12 @@ tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8 = st.tabs([
     "💰 Pricing Opportunities",
     "⚙️ Dynamic Pricing Engine",
     "🧾 Data Summary",
-])
+]
+tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8 = st.tabs(tab_names)
+
+# Set the active tab based on session state
+if st.session_state["current_tab"] == "Sales Forecasting":
+    tab2.active = True
 
 with tab1:
     st.subheader("📊 Executive Summary")
@@ -756,6 +787,9 @@ with tab1:
             st.info(f"💡 {len(pricing_opps)} potential pricing opportunities identified.")
 
 with tab2:
+    # Store that we're in the Sales Forecasting tab
+    on_tab_change("Sales Forecasting")
+    
     st.subheader("📈 Sales Forecasting & Business Intelligence")
     st.markdown("**🚀 Placement-Grade Analytics: Hybrid Forecasting + Anomaly Detection + Pricing Intelligence**")
     
@@ -843,6 +877,8 @@ with tab2:
             options=["-- Select Product --"] + product_list,
             key="forecast_product_selector"
         )
+        # Store the current tab in session state to prevent redirection
+        st.session_state["current_tab"] = "Sales Forecasting"
     with col_sel2:
         if selected_product and selected_product != "-- Select Product --":
             product_stats = features_df[features_df["product_name"] == selected_product]
@@ -873,21 +909,24 @@ with tab2:
             st.subheader("📈 Sales Forecasting")
             st.markdown("*Hybrid Ensemble Forecasting: Prophet + XGBoost + LightGBM*")
             
-            # Professional color palette - DARK THEME (matching reference)
-            C_FORECAST = "#00ff00"      # Bright green for forecast line
-            C_FORECAST_80_FILL = "rgba(0, 200, 0, 0.4)"  # 40% opacity dark green
-            C_FORECAST_95_FILL = "rgba(0, 150, 0, 0.25)"  # 25% opacity darker green
-            C_HISTORY = "#1e90ff"        # Blue for historical data
-            C_TARGET = "#d62728"          # Red for target marker
-            C_START_LINE = "#666666"      # Grey for separator
-            C_WHAT_IF = "#ff7f0e"         # Vibrant orange
+            # Professional color palette - DARK THEME (Placement-ready)
+            C_FORECAST = "#00C896"       # Teal for forecast line (primary)
+            C_FORECAST_80_FILL = "rgba(0, 200, 150, 0.35)"  # Teal 80% CI
+            C_FORECAST_95_FILL = "rgba(0, 200, 150, 0.15)"  # Teal 95% CI
+            C_HISTORY = "#888888"        # Gray for historical data
+            C_TARGET = "#d62728"        # Red for target marker
+            C_START_LINE = "#666666"     # Grey for separator
+            C_WHAT_IF = "#FFD43B"        # Amber for What-If scenarios
             C_BASELINE = C_FORECAST
-            C_ERROR = "#ff7f0e"
-            C_ANOMALY = "#FF6B6B"         # Red for anomalies
-            C_CHANGEPOINT = "#FFD43B"     # Yellow for changepoints
+            C_ERROR = "#FF6B6B"
+            C_ANOMALY = "#FF6B6B"        # Red for anomalies
+            C_CHANGEPOINT = "#FFD43B"    # Amber for changepoints
             C_FILL80 = C_FORECAST_80_FILL
             C_FILL95 = C_FORECAST_95_FILL
             OUTPUT_DIR = r"F:\RetailSense_Lite\outputs"
+            
+            # Import new functions
+            from utils.advanced_forecasting import run_hybrid_forecast, simulate_forecast_with_scenarios
             
             # Prepare time series data from product_df
             ts = product_df[["week_start", "sales_qty"]].copy()
@@ -916,8 +955,79 @@ with tab2:
             c3.metric("Stock Level", "-" if np.isnan(stock_level) else f"{stock_level:,.0f}")
             c4.metric("Series Length", len(ts))
             
-            # === DYNAMIC FORECAST CONTROLS ===
-            with st.expander("🎯 Forecast Settings", expanded=True):
+            # === TOP CONTROLS ROW ===
+            st.markdown("---")
+            st.markdown("### 🎯 Forecast Configuration")
+            
+            control_col1, control_col2, control_col3, control_col4 = st.columns(4)
+            
+            with control_col1:
+                st.markdown("**📦 Product**")
+                st.info(f"{selected_product}")
+            
+            with control_col2:
+                # Model preference selector
+                model_type = st.selectbox(
+                    "🤖 Model Type",
+                    options=["Hybrid", "Prophet", "XGBoost", "LightGBM"],
+                    index=0,
+                    help="Hybrid uses weighted ensemble of all models (recommended). Individual models for comparison.",
+                    key="model_preference_subtab"
+                )
+            
+            with control_col3:
+                # Forecast duration quick select
+                duration_options = {
+                    "6 Months": 26,
+                    "1 Year": 52,
+                    "3 Years": 156
+                }
+                duration_label = st.selectbox(
+                    "📅 Duration",
+                    options=list(duration_options.keys()),
+                    index=0,
+                    key="duration_select_subtab"
+                )
+                selected_horizon_weeks = duration_options[duration_label]
+                st.session_state["selected_horizon_weeks"] = selected_horizon_weeks
+            
+            with control_col4:
+                # Custom end date
+                last_date = pd.to_datetime(ts["date"]).max()
+                forecast_start = last_date + pd.DateOffset(weeks=1)
+                max_picker_date = last_date + pd.DateOffset(weeks=156)
+                default_end = last_date + pd.DateOffset(weeks=selected_horizon_weeks)
+                
+                custom_end_date = st.date_input(
+                    "📅 Custom End Date",
+                    value=default_end.date(),
+                    min_value=forecast_start.date(),
+                    max_value=max_picker_date.date(),
+                    help="Override duration with specific end date",
+                    key="custom_end_date_subtab"
+                )
+                if pd.to_datetime(custom_end_date) != default_end:
+                    # Recalculate horizon from custom date
+                    custom_end_dt = pd.to_datetime(custom_end_date)
+                    selected_horizon_weeks = max(1, int((custom_end_dt - last_date).days / 7))
+                    st.session_state["selected_horizon_weeks"] = selected_horizon_weeks
+            
+            # Performance mode
+            col_perf1, col_perf2 = st.columns([3, 1])
+            with col_perf1:
+                fast_mode = st.toggle(
+                    "⚡ Fast Mode (Recommended)", 
+                    value=True,
+                    help="Fast Mode: 10-15s | Slow Mode: Up to 3min with maximum detail",
+                    key="forecast_fast_mode_subtab_new"
+                )
+            with col_perf2:
+                run_forecast_btn = st.button("🚀 Run Forecast", type="primary", use_container_width=True, key="run_forecast_btn_new")
+            
+            st.markdown("---")
+            
+            # === DYNAMIC FORECAST CONTROLS (Legacy - keeping for compatibility) ===
+            with st.expander("⚙️ Advanced Settings", expanded=False):
                 # Compute last date in dataset
                 last_date = pd.to_datetime(ts["date"]).max()
                 st.info(f"📅 Last known data date: *{last_date.strftime('%Y-%m-%d')}*")
@@ -1074,44 +1184,65 @@ with tab2:
                     if "interactive_fc_ready_subtab" in st.session_state:
                         del st.session_state["interactive_fc_ready_subtab"]
                 
-                st.divider()
-                st.info("🚀 *3-Year Hybrid Engine*: Prophet + XGBoost + LightGBM + Trend Stabilizer - Enterprise-ready forecasting")
-                gen_clicked = st.button("🚀 Generate Forecast", type="primary", use_container_width=True, key="generate_forecast_subtab")
+                # Cache clear button
+                if st.button("🗑 Clear Cache", key="clear_cache_advanced"):
+                    st.cache_data.clear()
+                    if "forecast_result_subtab" in st.session_state:
+                        del st.session_state["forecast_result_subtab"]
+                    st.success("✅ Cache cleared!")
+                    st.rerun()
             
             # Determine if we should generate forecast
             current_horizon = st.session_state.get("selected_horizon_weeks", 26)
             cached_result = st.session_state.get("forecast_result_subtab")
             cached_horizon = st.session_state.get("cached_horizon_weeks")
+            cached_product = st.session_state.get("cached_product_forecast", "")
+            cached_model = st.session_state.get("cached_model_type", "hybrid")
             
-            # Generate if: button clicked OR no cached result OR horizon changed
-            need_regenerate = gen_clicked or (cached_result is None) or (cached_horizon != current_horizon)
-            use_cached = (cached_result is not None) and (cached_horizon == current_horizon) and not gen_clicked
+            # Check if we need to regenerate
+            need_regenerate = (run_forecast_btn or 
+                             (cached_result is None) or 
+                             (cached_horizon != current_horizon) or
+                             (cached_product != selected_product) or
+                             (cached_model != model_type.lower()))
+            
+            use_cached = (cached_result is not None and 
+                         cached_horizon == current_horizon and 
+                         cached_product == selected_product and
+                         cached_model == model_type.lower() and
+                         not run_forecast_btn)
             
             if need_regenerate:
                 st.session_state["interactive_fc_ready_subtab"] = True
                 
-                # Calculate exact horizon in days from weeks
+                # Calculate exact horizon
                 horizon_weeks = current_horizon
-                horizon_days = horizon_weeks * 7  # Convert to days for train_ensemble_for_app
+                custom_end = pd.to_datetime(custom_end_date) if 'custom_end_date' in locals() else None
                 
-                # Prepare time series for ensemble model (include all available columns)
-                ts_data = ts[["date", "sales_qty"]].copy()
-                if "price" in ts.columns:
-                    ts_data["price"] = ts["price"].values
-                if "stock_on_hand" in ts.columns:
-                    ts_data["stock_on_hand"] = ts["stock_on_hand"].values
-                
-                with st.spinner(f"⚡ Training hybrid ensemble model for {horizon_weeks} weeks ({horizon_days} days) ahead..."):
+                with st.spinner(f"⚡ Training {model_type} model for {selected_product} ({horizon_weeks} weeks ahead)..."):
                     try:
-                        @st.cache_data(ttl=600, show_spinner=False)
-                        def cached_forecast_app(_ts_data_hash, _horizon_days, _product_name, _fast_mode):
-                            return train_ensemble_for_app(ts_data, horizon_days=_horizon_days, fast_mode=_fast_mode, debug=False)
+                        @st.cache_data(ttl=3600, show_spinner=False)
+                        def cached_hybrid_forecast(_df_hash, _product, _horizon, _end_date, _model_type, _fast_mode):
+                            return run_hybrid_forecast(
+                                features_df, 
+                                product=_product,
+                                horizon_weeks=_horizon,
+                                end_date=_end_date,
+                                model_type=_model_type.lower(),
+                                fast_mode=_fast_mode
+                            )
                         
-                        # Create cache key from data hash AND horizon
-                        ts_hash = hash(str(ts_data[["date", "sales_qty"]].head(10).values.tobytes()))
-                        res_dict = cached_forecast_app(ts_hash, horizon_days, selected_product, fast_mode)
+                        # Create cache key
+                        df_hash = hash(str(features_df.head(100).values.tobytes()))
+                        res_dict = cached_hybrid_forecast(
+                            df_hash, selected_product, horizon_weeks, custom_end, model_type, fast_mode
+                        )
+                        
                         st.session_state["forecast_result_subtab"] = res_dict
-                        st.session_state["cached_horizon_weeks"] = horizon_weeks  # Store horizon with result
+                        st.session_state["cached_horizon_weeks"] = horizon_weeks
+                        st.session_state["cached_product_forecast"] = selected_product
+                        st.session_state["cached_model_type"] = model_type.lower()
+                        st.success(f"✅ Forecast generated using {model_type} model!")
                     except Exception as e:
                         st.error(f"❌ Forecast generation failed: {str(e)}")
                         with st.expander("🔍 View Error Details"):
@@ -1124,12 +1255,19 @@ with tab2:
             if "forecast_result_subtab" in st.session_state:
                 res_dict = st.session_state["forecast_result_subtab"]
                 
-                # Extract DataFrames and metrics
-                forecast_df = pd.DataFrame(res_dict["forecast"]) if isinstance(res_dict["forecast"], pd.DataFrame) else pd.DataFrame()
-                history_df = pd.DataFrame(res_dict["history"]) if isinstance(res_dict["history"], pd.DataFrame) else pd.DataFrame()
-                metrics = res_dict.get("metrics", {})
-                feature_importances = res_dict.get("feature_importances", {})
-                prophet_components = res_dict.get("prophet_components", {})
+                # Extract DataFrames and metrics from EnsembleResult object
+                forecast_df = res_dict.forecast_df if hasattr(res_dict, 'forecast_df') else pd.DataFrame()
+                if isinstance(forecast_df, pd.DataFrame) and forecast_df.empty:
+                    # No fallback needed with EnsembleResult object
+                
+                history_df = res_dict.history_df if hasattr(res_dict, 'history_df') else pd.DataFrame()
+                if isinstance(history_df, pd.DataFrame) and history_df.empty:
+                    # No fallback needed with EnsembleResult object
+                
+                metrics = res_dict.metrics if hasattr(res_dict, 'metrics') else {}
+                insights = res_dict.details if hasattr(res_dict, 'details') else {}
+                feature_importances = res_dict.feature_importances if hasattr(res_dict, 'feature_importances') else {}
+                prophet_components = res_dict.prophet_components if hasattr(res_dict, 'prophet_components') else {}
                 
                 if forecast_df.empty or history_df.empty:
                     st.error("❌ Forecast result is empty. Please retry.")
@@ -1144,123 +1282,218 @@ with tab2:
                 # Calculate comprehensive KPIs
                 month_names = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
                 
-                # Next week total
-                next_week_total = float(forecast_df.head(1)["yhat"].sum()) if len(forecast_df) > 0 and "yhat" in forecast_df.columns else 0.0
-                
-                # Next quarter (13 weeks)
-                next_q_forecast = float(forecast_df.head(13)["yhat"].sum()) if len(forecast_df) >= 13 and "yhat" in forecast_df.columns else float(forecast_df["yhat"].sum()) if "yhat" in forecast_df.columns else 0.0
+                # Ensure date columns are datetime
+                if "date" in forecast_df.columns:
+                    forecast_df["date"] = pd.to_datetime(forecast_df["date"])
+                if "date" in history_df.columns:
+                    history_df["date"] = pd.to_datetime(history_df["date"])
                 
                 # Growth percentage (next 4 weeks vs last 4 weeks)
-                if "yhat" in forecast_df.columns and "sales_qty" in history_df.columns and len(history_df) >= 4:
+                if "yhat" in forecast_df.columns and len(forecast_df) >= 4 and "sales_qty" in history_df.columns and len(history_df) >= 4:
                     forecast_next_4 = forecast_df.head(4)["yhat"].mean()
                     history_last_4 = history_df["sales_qty"].tail(4).mean()
                     growth_pct = ((forecast_next_4 - history_last_4) / (history_last_4 + 1e-6)) * 100
                 else:
                     growth_pct = 0.0
                 
-                # Peak and Min months
+                # Next quarter (13 weeks)
+                if "yhat" in forecast_df.columns and len(forecast_df) >= 13:
+                    next_q_forecast = float(forecast_df.head(13)["yhat"].sum())
+                elif "yhat" in forecast_df.columns:
+                    next_q_forecast = float(forecast_df["yhat"].sum())
+                else:
+                    next_q_forecast = 0.0
+                
+                # Peak month
                 if len(forecast_df) > 0 and "date" in forecast_df.columns and "yhat" in forecast_df.columns:
                     forecast_by_month = forecast_df.groupby(forecast_df["date"].dt.month)["yhat"].mean()
                     peak_month_idx = int(forecast_by_month.idxmax()) if not forecast_by_month.empty else 1
-                    min_month_idx = int(forecast_by_month.idxmin()) if not forecast_by_month.empty else 1
                 else:
                     peak_month_idx = 1
-                    min_month_idx = 1
                 
                 # Model metrics
                 r2_score_val = metrics.get("ensemble_r2", metrics.get("r2", 0))
                 rmse_val = metrics.get("ensemble_rmse", metrics.get("rmse", 0))
                 mae_val = metrics.get("ensemble_mae", metrics.get("mae", 0))
                 
-                # Stockout risk (if stock data available)
+                # Additional calculations
+                next_week_total = float(forecast_df.head(1)["yhat"].sum()) if len(forecast_df) > 0 and "yhat" in forecast_df.columns else 0.0
+                
+                # Min month
+                if len(forecast_df) > 0 and "date" in forecast_df.columns and "yhat" in forecast_df.columns:
+                    forecast_by_month = forecast_df.groupby(forecast_df["date"].dt.month)["yhat"].mean()
+                    min_month_idx = int(forecast_by_month.idxmin()) if not forecast_by_month.empty else 1
+                else:
+                    min_month_idx = 1
+                
+                # Stockout risk
                 stockout_risk = np.nan
                 if "stock_on_hand" in history_df.columns and len(history_df) > 0:
                     avg_stock = float(history_df["stock_on_hand"].tail(4).mean()) if not history_df["stock_on_hand"].tail(4).isna().all() else np.nan
-                    avg_fc_week = next_week_total
                     if not np.isnan(avg_stock) and avg_stock > 0:
-                        stockout_risk = float(np.clip((avg_fc_week - avg_stock) / max(avg_stock, 1), 0, 1))
+                        stockout_risk = float(np.clip((next_week_total - avg_stock) / max(avg_stock, 1), 0, 1))
                 
-                # Display KPIs in expanded row
+                stockout_display = "Low" if np.isnan(stockout_risk) or stockout_risk < 0.3 else "Med" if stockout_risk < 0.7 else "High"
+                
                 display_horizon = st.session_state.get("selected_horizon_weeks", 26)
                 
-                kpi1, kpi2, kpi3, kpi4, kpi5, kpi6 = st.columns(6)
+                # === BUSINESS KPI CARDS ===
+                st.markdown("---")
+                st.markdown("### 📊 Forecast Metrics")
+                
+                kpi1, kpi2, kpi3, kpi4 = st.columns(4)
                 with kpi1:
-                    st.metric("📊 Next Week", f"{next_week_total:.0f}", help="Predicted sales for next week")
+                    st.metric(
+                        "📈 Predicted Growth %", 
+                        f"{growth_pct:+.1f}%", 
+                        delta=f"{growth_pct:+.1f}%",
+                        help="Expected growth rate comparing next 4 weeks vs last 4 weeks historical"
+                    )
                 with kpi2:
-                    trend_dir = "📈" if growth_pct > 0 else "📉" if growth_pct < 0 else "➡️"
-                    st.metric(f"{trend_dir} Trend", f"{growth_pct:+.1f}%", delta=f"{growth_pct:+.1f}%", help="4-week forecast vs last 4 weeks")
+                    st.metric(
+                        "🧮 RMSE / Accuracy", 
+                        f"{rmse_val:.2f}", 
+                        help="Root Mean Square Error — measures forecast accuracy. Lower is better."
+                    )
                 with kpi3:
-                    st.metric("📅 Next Quarter", f"{next_q_forecast:.0f}", help="Total forecasted sales for next 13 weeks")
+                    st.metric(
+                        "💰 Next Quarter Expected Sales", 
+                        f"{next_q_forecast:,.0f}", 
+                        help="Total forecasted sales for next 13 weeks (one quarter)"
+                    )
                 with kpi4:
-                    st.metric("⭐ Peak Month", month_names[peak_month_idx-1], help="Month with highest predicted sales")
-                with kpi5:
-                    st.metric("🎯 Model R²", f"{r2_score_val:.3f}", help="Ensemble model R-squared")
-                with kpi6:
-                    stockout_display = "Low" if np.isnan(stockout_risk) or stockout_risk < 0.3 else "Med" if stockout_risk < 0.7 else "High"
-                    st.metric("⚠️ Stock Risk", stockout_display, help="Risk of stockout based on current inventory")
+                    st.metric(
+                        "🕓 Predicted Peak Month", 
+                        month_names[peak_month_idx-1], 
+                        help="Month with highest predicted sales volume"
+                    )
+                
+                # === INTERACTIVE CHART CONTROLS ===
+                st.markdown("### 📊 Interactive Forecast Chart")
+                
+                # Control panel for chart features
+                chart_col1, chart_col2, chart_col3 = st.columns(3)
+                with chart_col1:
+                    show_95_ci = st.checkbox("Show 95% Confidence Interval", value=True, help="Wider uncertainty band")
+                    show_80_ci = st.checkbox("Show 80% Confidence Interval", value=True, help="Narrower uncertainty band")
+                with chart_col2:
+                    show_seasonal = st.checkbox("Show Seasonal Component", value=False, help="Display Prophet seasonal decomposition")
+                    highlight_peaks = st.checkbox("Highlight Peak Months", value=True, help="Mark months with highest sales")
+                with chart_col3:
+                    show_trend = st.checkbox("Show Trend Line", value=True, help="Display underlying trend")
+                    show_anomalies = st.checkbox("Show Anomalies", value=True, help="Mark detected anomalies in historical data")
                 
                 # Interactive Chart with anomalies, changepoints, and dual CI bands
                 fig = go.Figure()
                 
-                # Historical data
+                # Historical data (gray as per requirements)
                 fig.add_trace(go.Scatter(
                         x=history_df["date"], y=history_df["sales_qty"],
                         name="Historical Sales", mode="lines+markers",
-                        line=dict(color=C_HISTORY, width=2),
-                        marker=dict(size=6, color=C_HISTORY)
+                        line=dict(color="#888888", width=2),  # Gray for historical
+                        marker=dict(size=6, color="#888888"),
+                        hovertemplate="Date: %{x}<br>Sales: %{y:,.0f}<extra></extra>"
                 ))
                 
-                # Detect and plot anomalies on historical data
-                try:
-                    anomalies_df = detect_sales_anomalies(features_df, selected_product)
-                    if not anomalies_df.empty and "date" in anomalies_df.columns and "actual_sales" in anomalies_df.columns:
-                        anom_dates = pd.to_datetime(anomalies_df["date"], errors='coerce')
-                        anom_values = anomalies_df["actual_sales"]
-                        valid_mask = anom_dates.notna() & anom_values.notna()
-                        if valid_mask.sum() > 0:
-                            fig.add_trace(go.Scatter(
-                                x=anom_dates[valid_mask], 
-                                y=anom_values[valid_mask],
-                                mode="markers", 
-                                name="Anomalies", 
-                                marker=dict(color=C_ANOMALY, symbol="x", size=12, line=dict(width=2, color="white"))
-                            ))
-                except Exception:
-                    pass  # Silently fail if anomaly detection errors
+                # Detect and plot anomalies on historical data (if enabled)
+                if show_anomalies:
+                    try:
+                        anomalies_df = detect_sales_anomalies(features_df, selected_product)
+                        if not anomalies_df.empty and "date" in anomalies_df.columns and "actual_sales" in anomalies_df.columns:
+                            anom_dates = pd.to_datetime(anomalies_df["date"], errors='coerce')
+                            anom_values = anomalies_df["actual_sales"]
+                            valid_mask = anom_dates.notna() & anom_values.notna()
+                            if valid_mask.sum() > 0:
+                                # Color code by severity if available
+                                if "severity" in anomalies_df.columns:
+                                    for severity in anomalies_df["severity"].unique():
+                                        sev_mask = anomalies_df["severity"] == severity
+                                        anom_sev_dates = anom_dates[sev_mask & valid_mask]
+                                        anom_sev_values = anom_values[sev_mask & valid_mask]
+                                        if len(anom_sev_dates) > 0:
+                                            color_map = {"severe": "#FF0000", "moderate": "#FFA500", "mild": "#FFD700"}
+                                            color = color_map.get(severity.lower(), C_ANOMALY)
+                                            fig.add_trace(go.Scatter(
+                                                x=anom_sev_dates, 
+                                                y=anom_sev_values,
+                                                mode="markers", 
+                                                name=f"Anomalies ({severity})", 
+                                                marker=dict(color=color, symbol="x", size=14, line=dict(width=2, color="white"))
+                                            ))
+                                else:
+                                    fig.add_trace(go.Scatter(
+                                        x=anom_dates[valid_mask], 
+                                        y=anom_values[valid_mask],
+                                        mode="markers", 
+                                        name="Anomalies", 
+                                        marker=dict(color=C_ANOMALY, symbol="x", size=12, line=dict(width=2, color="white")),
+                                        hovertemplate="<b>ANOMALY</b><br>Date: %{x}<br>Sales: %{y:,.0f}<extra></extra>"
+                                    ))
+                    except Exception:
+                        pass  # Silently fail if anomaly detection errors
                 
-                # Forecast mean line
+                # Forecast mean line (with smoothing for better visualization)
                 fig.add_trace(go.Scatter(
                         x=forecast_df["date"], y=forecast_df["yhat"],
                         name="Forecast Mean", mode="lines",
-                        line=dict(color=C_FORECAST, width=3)
+                        line=dict(color="#00C896", width=3, smoothing=1.3),
+                        hovertemplate="Date: %{x}<br>Forecast: %{y:,.0f}<extra></extra>"
                 ))
                 
-                # Calculate 80% CI if not present (approximate as ±1.28 std for 80%)
-                if "yhat_upper" in forecast_df.columns and "yhat_lower" in forecast_df.columns:
+                # Calculate confidence intervals
+                has_95 = "yhat_upper_95" in forecast_df.columns and "yhat_lower_95" in forecast_df.columns
+                
+                if has_95:
+                    yhat_upper95 = forecast_df["yhat_upper_95"].values
+                    yhat_lower95 = forecast_df["yhat_lower_95"].values
+                    yhat_upper80 = forecast_df["yhat_upper"].values
+                    yhat_lower80 = forecast_df["yhat_lower"].values
+                elif "yhat_upper" in forecast_df.columns and "yhat_lower" in forecast_df.columns:
                     yhat_mean = forecast_df["yhat"].values
                     yhat_upper95 = forecast_df["yhat_upper"].values
                     yhat_lower95 = forecast_df["yhat_lower"].values
-                    # Approximate 80% CI as narrower band (80% is roughly 0.842 std vs 1.96 for 95%)
+                    # Approximate 80% CI as narrower band
                     ci_range_95 = (yhat_upper95 - yhat_lower95) / 2
-                    ci_range_80 = ci_range_95 * (1.28 / 1.96)  # Scale from 95% to 80%
+                    ci_range_80 = ci_range_95 * (1.28 / 1.96)
                     yhat_upper80 = yhat_mean + ci_range_80
                     yhat_lower80 = yhat_mean - ci_range_80
-                    
-                    # 95% CI band (outer, lighter)
+                else:
+                    yhat_upper95 = yhat_upper80 = yhat_lower95 = yhat_lower80 = None
+                
+                # 95% CI band (outer, lighter) - if enabled
+                if show_95_ci and yhat_upper95 is not None:
                     fig.add_trace(go.Scatter(
                         x=pd.concat([forecast_df["date"], forecast_df["date"][::-1]]),
                         y=pd.concat([pd.Series(yhat_upper95), pd.Series(yhat_lower95)[::-1]]),
-                        fill='toself', fillcolor=C_FILL95, line=dict(color='rgba(255,255,255,0)'),
-                        hoverinfo="skip", showlegend=True, name='95% Confidence Interval'
+                        fill='toself', fillcolor='rgba(0, 200, 150, 0.15)', line=dict(color='rgba(255,255,255,0)'),
+                        hoverinfo="skip", showlegend=True, name='95% Confidence Interval',
+                        hovertemplate="95% CI: %{y:,.0f}<extra></extra>"
                     ))
-                    
-                    # 80% CI band (inner, darker)
+                
+                # 80% CI band (inner, darker) - if enabled
+                if show_80_ci and yhat_upper80 is not None:
                     fig.add_trace(go.Scatter(
                         x=pd.concat([forecast_df["date"], forecast_df["date"][::-1]]),
                         y=pd.concat([pd.Series(yhat_upper80), pd.Series(yhat_lower80)[::-1]]),
-                        fill='toself', fillcolor=C_FILL80, line=dict(color='rgba(255,255,255,0)'),
-                        hoverinfo="skip", showlegend=True, name='80% Confidence Interval'
+                        fill='toself', fillcolor='rgba(0, 200, 150, 0.35)', line=dict(color='rgba(255,255,255,0)'),
+                        hoverinfo="skip", showlegend=True, name='80% Confidence Interval',
+                        hovertemplate="80% CI: %{y:,.0f}<extra></extra>"
                     ))
+                
+                # Highlight peak months if enabled
+                if highlight_peaks and len(forecast_df) > 0:
+                    forecast_by_month = forecast_df.groupby(forecast_df["date"].dt.month)["yhat"].mean()
+                    if not forecast_by_month.empty:
+                        peak_month = forecast_by_month.idxmax()
+                        peak_dates = forecast_df[forecast_df["date"].dt.month == peak_month]["date"]
+                        peak_values = forecast_df[forecast_df["date"].dt.month == peak_month]["yhat"]
+                        if len(peak_dates) > 0:
+                            fig.add_trace(go.Scatter(
+                                x=peak_dates, y=peak_values,
+                                mode="markers", name="Peak Months",
+                                marker=dict(color="#FFD43B", symbol="star", size=10, line=dict(width=1, color="orange")),
+                                hovertemplate="<b>PEAK MONTH</b><br>Date: %{x}<br>Forecast: %{y:,.0f}<extra></extra>"
+                            ))
                 
                 # Add changepoints from Prophet if available
                 changepoints = prophet_components.get("changepoints", [])
@@ -1304,17 +1537,177 @@ with tab2:
                 # Get horizon for title
                 title_horizon = st.session_state.get("selected_horizon_weeks", 26)
                 
+                # Add trend line if enabled
+                if show_trend and not history_df.empty:
+                    # Simple trend from historical data
+                    trend_dates = history_df["date"]
+                    trend_values = history_df["sales_qty"].rolling(window=4, center=True).mean()
+                    fig.add_trace(go.Scatter(
+                        x=trend_dates, y=trend_values,
+                        name="Trend", mode="lines",
+                        line=dict(color="#888888", width=1, dash="dot"),
+                        hovertemplate="Trend: %{y:,.0f}<extra></extra>"
+                    ))
+                
+                # Add seasonal component if available and enabled
+                if show_seasonal and prophet_components:
+                    try:
+                        if isinstance(prophet_components, dict):
+                            # Try to extract seasonal data
+                            pass  # Will handle in Prophet components section
+                        elif isinstance(prophet_components, pd.DataFrame):
+                            if "yearly" in prophet_components.columns:
+                                season_df = prophet_components[["date", "yearly"]].copy()
+                                season_df["date"] = pd.to_datetime(season_df["date"])
+                                season_df = season_df[season_df["date"] <= history_df["date"].max()]
+                                if len(season_df) > 0:
+                                    # Normalize seasonal component to visible scale
+                                    seasonal_normalized = season_df["yearly"] * (history_df["sales_qty"].mean() / season_df["yearly"].abs().max()) * 0.3
+                                    fig.add_trace(go.Scatter(
+                                        x=season_df["date"], y=seasonal_normalized,
+                                        name="Seasonal Component", mode="lines",
+                                        line=dict(color="#FFD43B", width=2, dash="dash"),
+                                        hovertemplate="Seasonal: %{y:,.0f}<extra></extra>"
+                                    ))
+                    except Exception:
+                        pass
+                
                 fig.update_layout(
                     title=f"{selected_product} - Sales Forecast ({title_horizon} weeks ahead)",
                     xaxis_title="Date",
                     yaxis_title="Sales Quantity",
                     template="plotly_dark",
-                    height=600,
+                    height=650,
                     hovermode='x unified',
                     showlegend=True,
-                    xaxis=dict(rangeslider=dict(visible=True))
+                    legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+                    xaxis=dict(rangeslider=dict(visible=True, thickness=0.1)),
+                    yaxis=dict(gridcolor='rgba(128, 128, 128, 0.2)')
                 )
                 st.plotly_chart(fig, use_container_width=True, key="main_forecast_chart")
+                
+                # === WHAT-IF SCENARIO SIMULATION ===
+                st.markdown("---")
+                st.markdown("### 💡 What-If Scenario Simulation")
+                st.caption("Simulate different business scenarios to see impact on forecasted sales")
+                
+                whatif_col1, whatif_col2, whatif_col3 = st.columns(3)
+                
+                with whatif_col1:
+                    price_delta = st.slider(
+                        "💰 Price Change (%)",
+                        min_value=-20,
+                        max_value=20,
+                        value=0,
+                        step=1,
+                        help="Adjust price: -20% to +20%",
+                        key="whatif_price_slider"
+                    )
+                
+                with whatif_col2:
+                    promotion_flag = st.checkbox(
+                        "🎯 Active Promotion",
+                        value=False,
+                        help="Simulate promotion effect (+15-25% boost)",
+                        key="whatif_promotion"
+                    )
+                
+                with whatif_col3:
+                    holiday_flag = st.checkbox(
+                        "🎉 Holiday Period",
+                        value=False,
+                        help="Simulate holiday effect (+20-35% boost)",
+                        key="whatif_holiday"
+                    )
+                
+                # Calculate elasticity for product
+                try:
+                    from utils.business_insights import calculate_price_elasticity
+                    elasticity = calculate_price_elasticity(features_df, selected_product)
+                except:
+                    elasticity = -1.2  # Default
+                
+                # Simulate forecast
+                if price_delta != 0 or promotion_flag or holiday_flag:
+                    sim_forecast = simulate_forecast_with_scenarios(
+                        forecast_df, 
+                        price_delta=price_delta,
+                        promotion_flag=promotion_flag,
+                        holiday_flag=holiday_flag,
+                        elasticity=elasticity
+                    )
+                    
+                    # Calculate impact
+                    base_total = forecast_df["yhat"].sum()
+                    sim_total = sim_forecast["yhat_simulated"].sum()
+                    impact_pct = ((sim_total - base_total) / base_total) * 100
+                    
+                    # What-If Chart
+                    fig_whatif = go.Figure()
+                    
+                    # Base forecast
+                    fig_whatif.add_trace(go.Scatter(
+                        x=forecast_df["date"],
+                        y=forecast_df["yhat"],
+                        name="Base Forecast",
+                        mode="lines",
+                        line=dict(color=C_FORECAST, width=3),
+                        hovertemplate="Base: %{y:,.0f}<extra></extra>"
+                    ))
+                    
+                    # Simulated forecast
+                    fig_whatif.add_trace(go.Scatter(
+                        x=sim_forecast["date"],
+                        y=sim_forecast["yhat_simulated"],
+                        name="Simulated Forecast",
+                        mode="lines",
+                        line=dict(color=C_WHAT_IF, width=3, dash="dash"),
+                        hovertemplate="Simulated: %{y:,.0f}<extra></extra>"
+                    ))
+                    
+                    # Confidence intervals for simulated
+                    if "yhat_upper_simulated" in sim_forecast.columns:
+                        fig_whatif.add_trace(go.Scatter(
+                            x=pd.concat([sim_forecast["date"], sim_forecast["date"][::-1]]),
+                            y=pd.concat([pd.Series(sim_forecast["yhat_upper_simulated"]), pd.Series(sim_forecast["yhat_lower_simulated"])[::-1]]),
+                            fill='toself',
+                            fillcolor='rgba(255, 212, 59, 0.2)',
+                            line=dict(color='rgba(255,255,255,0)'),
+                            name='Simulated CI',
+                            showlegend=False,
+                            hoverinfo="skip"
+                        ))
+                    
+                    fig_whatif.update_layout(
+                        title="What-If Scenario Comparison",
+                        xaxis_title="Date",
+                        yaxis_title="Sales Quantity",
+                        template="plotly_dark",
+                        height=500,
+                        hovermode='x unified',
+                        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1)
+                    )
+                    
+                    st.plotly_chart(fig_whatif, use_container_width=True, key="whatif_chart")
+                    
+                    # Impact summary
+                    scenario_desc = []
+                    if price_delta != 0:
+                        scenario_desc.append(f"{price_delta:+.0f}% price change")
+                    if promotion_flag:
+                        scenario_desc.append("promotion active")
+                    if holiday_flag:
+                        scenario_desc.append("holiday period")
+                    
+                    scenario_text = " + ".join(scenario_desc) if scenario_desc else "baseline"
+                    st.success(
+                        f"📊 **Scenario:** {scenario_text} → "
+                        f"Projected sales {'increase' if impact_pct > 0 else 'decrease'} by **{abs(impact_pct):.1f}%** "
+                        f"over next {min(60, len(forecast_df)*7)} days. "
+                        f"Total impact: {sim_total:,.0f} vs {base_total:,.0f} units."
+                    )
+                else:
+                    st.info("💡 Adjust sliders above to simulate different business scenarios")
                 
                 # Save forecast CSV
                 try:
@@ -1327,11 +1720,125 @@ with tab2:
                 except Exception as e:
                     st.warning(f"Could not save forecast CSV: {e}")
                 
-                # Auto-generated insight
-                month_names = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
-                insight = f"**{selected_product}** sales expected to {'grow' if growth_pct > 0 else 'decline'} **{abs(growth_pct):.1f}%** in the next quarter. "
-                insight += f"Peak sales predicted for **{month_names[peak_month_idx-1]}** driven by seasonal patterns. "
-                insight += f"Model accuracy (R²): **{r2_score_val:.3f}**, RMSE: **{rmse_val:.2f}**, MAE: **{mae_val:.2f}**."
+                # === BUSINESS INSIGHTS SECTION ===
+                st.markdown("---")
+                st.markdown("### 🧠 Business Intelligence Insights")
+                
+                # Get insights from forecast result or generate
+                narrative = insights.get("narrative", "") if insights else ""
+                top_drivers = insights.get("top_drivers", []) if insights else []
+                recommendations = insights.get("recommendations", []) if insights else []
+                
+                # Generate narrative if not provided
+                if not narrative:
+                    month_names = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
+                    if growth_pct > 5:
+                        narrative = f"{selected_product} sales expected to rise {growth_pct:.1f}% in the next month, driven by seasonal demand. Consider bundling with complementary products to leverage seasonality."
+                    elif growth_pct < -5:
+                        narrative = f"{selected_product} sales expected to decline {abs(growth_pct):.1f}% — review market conditions and consider promotional strategies."
+                    else:
+                        narrative = f"{selected_product} sales expected to remain stable with {abs(growth_pct):.1f}% variation. Peak sales predicted for {month_names[peak_month_idx-1]}."
+                
+                # Display narrative
+                st.markdown(f"**📝 Executive Summary:** {narrative}")
+                
+                # Top Drivers section
+                if top_drivers or feature_importances:
+                    st.markdown("#### 🎯 Top Forecast Drivers")
+                    drivers_col1, drivers_col2 = st.columns(2)
+                    
+                    with drivers_col1:
+                        if top_drivers:
+                            for i, driver in enumerate(top_drivers[:3], 1):
+                                st.markdown(f"{i}. {driver}")
+                        else:
+                            # Fallback to feature importances
+                            if feature_importances and isinstance(feature_importances, dict):
+                                top_features = sorted(feature_importances.items(), key=lambda x: x[1], reverse=True)[:3]
+                                for i, (feat, imp) in enumerate(top_features, 1):
+                                    st.markdown(f"{i}. {feat} (importance: {imp:.2f})")
+                    
+                    with drivers_col2:
+                        if len(top_drivers) > 3:
+                            for i, driver in enumerate(top_drivers[3:], 4):
+                                st.markdown(f"{i}. {driver}")
+                        elif feature_importances and isinstance(feature_importances, dict) and len(feature_importances) > 3:
+                            top_features = sorted(feature_importances.items(), key=lambda x: x[1], reverse=True)[3:6]
+                            for i, (feat, imp) in enumerate(top_features, 4):
+                                st.markdown(f"{i}. {feat} (importance: {imp:.2f})")
+                
+                # Recommendations section
+                if recommendations:
+                    st.markdown("#### 💡 Recommendations")
+                    for rec in recommendations:
+                        st.markdown(f"- {rec}")
+                else:
+                    # Generate default recommendations
+                    st.markdown("#### 💡 Recommendations")
+                    st.markdown(f"- Increase stock before {month_names[peak_month_idx-1]} to prepare for peak demand")
+                    st.markdown("- Leverage seasonal promotions during peak months")
+                    st.markdown("- Monitor price elasticity for optimization opportunities")
+                
+                # === TOP 5 FORECASTED WEEKS TABLE ===
+                st.markdown("---")
+                st.markdown("#### 📋 Top 5 Forecasted Weeks")
+                
+                if len(forecast_df) >= 5 and "yhat" in forecast_df.columns:
+                    top_weeks = forecast_df.nlargest(5, "yhat")[["date", "yhat", "yhat_lower", "yhat_upper"]].copy()
+                    top_weeks["date"] = pd.to_datetime(top_weeks["date"]).dt.strftime("%Y-%m-%d")
+                    top_weeks["CI_Range"] = (top_weeks["yhat_upper"] - top_weeks["yhat_lower"]).round(0)
+                    
+                    # Calculate % growth
+                    if len(history_df) > 0 and "sales_qty" in history_df.columns:
+                        baseline = history_df["sales_qty"].tail(4).mean()
+                        top_weeks["Growth_%"] = ((top_weeks["yhat"] - baseline) / baseline * 100).round(1)
+                    else:
+                        top_weeks["Growth_%"] = 0.0
+                    
+                    # Rename columns for display
+                    top_weeks_display = top_weeks.rename(columns={
+                        "date": "Date",
+                        "yhat": "Forecasted Sales",
+                        "CI_Range": "CI Range",
+                        "Growth_%": "% Growth"
+                    })
+                    
+                    st.dataframe(
+                        top_weeks_display[["Date", "Forecasted Sales", "CI Range", "% Growth"]],
+                        use_container_width=True,
+                        hide_index=True
+                    )
+                
+                # Download buttons
+                st.markdown("---")
+                st.markdown("#### 📥 Export Forecast")
+                
+                col_dl1, col_dl2, col_dl3 = st.columns(3)
+                with col_dl1:
+                    # CSV download
+                    csv_data = forecast_df.to_csv(index=False)
+                    st.download_button(
+                        label="📥 Download Forecast CSV",
+                        data=csv_data,
+                        file_name=f"forecast_{selected_product.replace(' ', '_')}_{pd.Timestamp.now().strftime('%Y%m%d')}.csv",
+                        mime="text/csv",
+                        key="download_forecast_csv_new"
+                    )
+                with col_dl2:
+                    # Metrics JSON
+                    metrics_json = json.dumps(metrics, indent=2)
+                    st.download_button(
+                        label="📊 Download Metrics JSON",
+                        data=metrics_json,
+                        file_name=f"metrics_{selected_product.replace(' ', '_')}.json",
+                        mime="application/json",
+                        key="download_metrics_json_new"
+                    )
+                with col_dl3:
+                    # PDF report placeholder
+                    st.caption("📄 PDF Report")
+                    st.caption("(Requires reportlab package)")
+                    # Note: Full PDF generation would require reportlab or similar library
                 
                 # Create tabs for Forecast Overview, Model Insights, and Business Implications
                 tab_overview, tab_insights, tab_business = st.tabs([
@@ -1341,7 +1848,7 @@ with tab2:
                 ])
                 
                 with tab_overview:
-                    st.info(f"💡 {insight}")
+                    st.info(f"💡 {narrative}")
                     st.markdown(f"### 📊 Forecast Overview for {selected_product}")
                     st.markdown(f"**Forecast Horizon:** {display_horizon} weeks ({display_horizon * 7} days)")
                     st.markdown(f"**Last Known Date:** {last_date.strftime('%Y-%m-%d')}")
@@ -1404,14 +1911,33 @@ with tab2:
                                 # Display feature importance chart
                                 driver_fig = px.bar(
                                     fi_df, x="importance", y="feature",
-                                    orientation='h', title="Feature Importance",
-                                    labels={"importance": "Importance Score", "feature": "Feature"}
+                                    orientation='h', title="🎯 Feature Influence on Forecast",
+                                    labels={"importance": "Importance Score", "feature": "Feature"},
+                                    color="importance",
+                                    color_continuous_scale="Viridis"
                                 )
-                                driver_fig.update_layout(template="plotly_dark", height=400)
+                                driver_fig.update_layout(
+                                    template="plotly_dark", 
+                                    height=400,
+                                    xaxis_title="Feature Importance",
+                                    yaxis_title="Features",
+                                    showlegend=False
+                                )
                                 st.plotly_chart(driver_fig, use_container_width=True, key="feature_importance_chart")
+                                
+                                st.caption("💡 Features with higher importance have greater influence on forecast predictions")
                                 
                                 # Show table
                                 st.dataframe(fi_df, use_container_width=True, hide_index=True)
+                                
+                                # SHAP Values (if available)
+                                if SHAP_AVAILABLE:
+                                    try:
+                                        from utils.advanced_forecasting import compute_shap_values
+                                        # Note: Would need model access and feature matrix for full SHAP
+                                        st.info("🔬 Full SHAP analysis requires model access. Feature importances above show relative importance.")
+                                    except:
+                                        pass
                             else:
                                 st.info("Feature importances not available for this model.")
                         else:
@@ -1475,7 +2001,7 @@ with tab2:
                     if not np.isnan(stockout_risk) and stockout_risk > 0.5:
                         business_summary += f"- 🚨 **Stock Alert:** High stockout risk detected - consider increasing inventory levels\n"
                     
-                    business_summary += f"\n**Automated Insight:** {insight}"
+                    business_summary += f"\n**Automated Insight:** {narrative}"
                     
                     st.markdown(business_summary)
                     
@@ -1615,7 +2141,7 @@ Key Insights:
   - Minimum Month: {month_names[min_month_idx-1]}
   - Stockout Risk: {stockout_display}
 
-{insight}
+{narrative}
 """
                     st.download_button(
                         "⬇️ Download Insight Text",
@@ -1639,6 +2165,50 @@ Key Insights:
             
             anomalies_df = get_anomalies(features_df, selected_product)
             
+            # === ANOMALY SUMMARY PANEL ===
+            if not anomalies_df.empty:
+                # Count by severity
+                if "severity" in anomalies_df.columns:
+                    severe_count = len(anomalies_df[anomalies_df["severity"].str.contains("severe", case=False, na=False)])
+                    moderate_count = len(anomalies_df[anomalies_df["severity"].str.contains("moderate", case=False, na=False)])
+                    mild_count = len(anomalies_df[anomalies_df["severity"].str.contains("mild", case=False, na=False)])
+                else:
+                    # Estimate severity from deviation
+                    if "deviation_pct" in anomalies_df.columns:
+                        severe_count = len(anomalies_df[anomalies_df["deviation_pct"].abs() > 50])
+                        moderate_count = len(anomalies_df[(anomalies_df["deviation_pct"].abs() > 25) & (anomalies_df["deviation_pct"].abs() <= 50)])
+                        mild_count = len(anomalies_df[anomalies_df["deviation_pct"].abs() <= 25])
+                    else:
+                        severe_count = moderate_count = mild_count = 0
+                
+                total_anomalies = len(anomalies_df)
+                
+                # Summary panel
+                st.markdown("#### 📊 Anomaly Summary")
+                summary_col1, summary_col2, summary_col3, summary_col4 = st.columns(4)
+                with summary_col1:
+                    st.metric("Total Anomalies", total_anomalies, help="Total number of anomalies detected")
+                with summary_col2:
+                    st.metric("🔴 Severe", severe_count, delta=f"{severe_count} urgent", delta_color="inverse")
+                with summary_col3:
+                    st.metric("🟡 Moderate", moderate_count)
+                with summary_col4:
+                    st.metric("🟢 Mild", mild_count)
+                
+                # Likely causes
+                causes = []
+                if severe_count > 0:
+                    causes.append("supply chain disruption")
+                if moderate_count > 0:
+                    causes.append("promotion effect")
+                if mild_count > 0:
+                    causes.append("normal variation")
+                
+                if causes:
+                    st.info(f"🔍 **Likely causes:** {', '.join(set(causes))}")
+            else:
+                st.success("✅ No anomalies detected — sales patterns are within expected ranges")
+            
             # Save anomalies CSV
             try:
                 os.makedirs(OUTPUT_DIR, exist_ok=True)
@@ -1652,10 +2222,13 @@ Key Insights:
                 pass
             
             if not anomalies_df.empty:
-                # KPI Badges
-                severe_count = len(anomalies_df[anomalies_df["severity"] == "severe"])
-                moderate_count = len(anomalies_df[anomalies_df["severity"] == "moderate"])
-                mild_count = len(anomalies_df[anomalies_df["severity"] == "mild"])
+                # Use existing severity counts if already computed
+                if "severity" in anomalies_df.columns:
+                    severe_count = len(anomalies_df[anomalies_df["severity"] == "severe"])
+                    moderate_count = len(anomalies_df[anomalies_df["severity"] == "moderate"])
+                    mild_count = len(anomalies_df[anomalies_df["severity"] == "mild"])
+                else:
+                    severe_count = moderate_count = mild_count = 0
                 
                 col_a1, col_a2, col_a3, col_a4 = st.columns(4)
                 with col_a1:
