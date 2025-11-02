@@ -10,8 +10,16 @@ from typing import Dict, List, Tuple, Optional, Any
 from sklearn.ensemble import IsolationForest
 from sklearn.preprocessing import StandardScaler
 from sklearn.metrics import mean_squared_error, r2_score
+from scipy import stats
 import warnings
 warnings.filterwarnings("ignore")
+
+# Try to import Prophet for residual analysis
+try:
+    from prophet import Prophet
+    PROPHET_AVAILABLE_BI = True
+except ImportError:
+    PROPHET_AVAILABLE_BI = False
 
 # ============================================================================
 # PART 2: Sales Anomaly Detection
@@ -19,13 +27,14 @@ warnings.filterwarnings("ignore")
 
 def detect_sales_anomalies(df: pd.DataFrame, product_name: str, method: str = "hybrid") -> pd.DataFrame:
     """
-    Hybrid anomaly detection using Z-score, IQR, and Isolation Forest.
+    Tier-3 Hybrid anomaly detection: Isolation Forest + Z-Score + Prophet Residual Analysis.
+    Dynamically adapts sensitivity based on time series volatility.
     
-    Returns DataFrame with columns: date, actual_sales, expected_sales, deviation_pct, severity, suggested_action
+    Returns DataFrame with columns: date, actual_sales, expected_sales, deviation_pct, severity, suggested_action, confidence
     """
     product_df = df[df["product_name"] == product_name].copy()
     if len(product_df) < 10:
-        return pd.DataFrame(columns=["date", "actual_sales", "expected_sales", "deviation_pct", "severity", "suggested_action"])
+        return pd.DataFrame(columns=["date", "actual_sales", "expected_sales", "deviation_pct", "severity", "suggested_action", "confidence"])
     
     product_df = product_df.sort_values("week_start").reset_index(drop=True)
     product_df["week_start"] = pd.to_datetime(product_df["week_start"])
@@ -35,9 +44,12 @@ def detect_sales_anomalies(df: pd.DataFrame, product_name: str, method: str = "h
     product_df["expected_sales"] = product_df["sales_qty"].rolling(window=window, center=True).mean()
     product_df["expected_sales"] = product_df["expected_sales"].fillna(method="ffill").fillna(method="bfill")
     
-    # Method 1: Z-score
+    # Method 1: Z-Score (Adaptive threshold based on volatility)
     mean_sales = product_df["sales_qty"].mean()
     std_sales = product_df["sales_qty"].std()
+    cv = std_sales / (mean_sales + 1e-6)  # Coefficient of variation
+    # Adaptive threshold: higher volatility = lower threshold
+    z_threshold = 2.5 if cv < 0.3 else (2.0 if cv < 0.5 else 1.5)
     product_df["z_score"] = (product_df["sales_qty"] - mean_sales) / (std_sales + 1e-6)
     
     # Method 2: IQR
@@ -48,35 +60,80 @@ def detect_sales_anomalies(df: pd.DataFrame, product_name: str, method: str = "h
     product_df["iqr_upper"] = Q3 + 1.5 * IQR
     
     # Method 3: Isolation Forest
+    iso_outlier = np.ones(len(product_df))  # Default: no anomaly
     if method == "hybrid" and len(product_df) >= 20:
-        features = product_df[["sales_qty", "price", "stock_on_hand"]].fillna(0)
-        iso_forest = IsolationForest(contamination=0.1, random_state=42)
-        product_df["iso_outlier"] = iso_forest.fit_predict(features)
-    else:
-        product_df["iso_outlier"] = 1  # No anomaly
+        feature_cols = ["sales_qty"]
+        if "price" in product_df.columns:
+            feature_cols.append("price")
+        if "stock_on_hand" in product_df.columns:
+            feature_cols.append("stock_on_hand")
+        
+        features = product_df[feature_cols].fillna(0)
+        if len(features.columns) > 0:
+            try:
+                contamination = max(0.05, min(0.2, 10 / len(product_df)))  # Adaptive contamination
+                iso_forest = IsolationForest(contamination=contamination, random_state=42, n_estimators=100)
+                iso_outlier = iso_forest.fit_predict(features.values)
+            except:
+                pass
     
-    # Combine methods
-    product_df["is_anomaly"] = (
-        (product_df["z_score"].abs() > 2.5) |
-        (product_df["sales_qty"] < product_df["iqr_lower"]) |
-        (product_df["sales_qty"] > product_df["iqr_upper"]) |
-        (product_df["iso_outlier"] == -1)
+    product_df["iso_outlier"] = iso_outlier
+    
+    # Method 4: Prophet Residual Analysis (if available)
+    prophet_residual_flag = np.zeros(len(product_df))
+    if PROPHET_AVAILABLE_BI and method == "hybrid" and len(product_df) >= 52:  # Need enough data
+        try:
+            prophet_df = product_df[["week_start", "sales_qty"]].copy()
+            prophet_df.columns = ["ds", "y"]
+            prophet_df = prophet_df.sort_values("ds")
+            
+            m = Prophet(yearly_seasonality=True, weekly_seasonality=False, daily_seasonality=False)
+            m.fit(prophet_df)
+            forecast = m.predict(prophet_df)
+            
+            residuals = prophet_df["y"].values - forecast["yhat"].values
+            residual_std = np.std(residuals)
+            # Flag if residual > 2.5 standard deviations
+            prophet_residual_flag = (np.abs(residuals) > 2.5 * residual_std).astype(int)
+        except:
+            pass
+    
+    product_df["prophet_residual"] = prophet_residual_flag
+    
+    # Combine methods (weighted ensemble)
+    product_df["z_anomaly"] = (product_df["z_score"].abs() > z_threshold).astype(int)
+    product_df["iqr_anomaly"] = ((product_df["sales_qty"] < product_df["iqr_lower"]) | 
+                                  (product_df["sales_qty"] > product_df["iqr_upper"])).astype(int)
+    product_df["iso_anomaly"] = (product_df["iso_outlier"] == -1).astype(int)
+    
+    # Weighted combination (Z-score: 0.3, IQR: 0.3, Isolation Forest: 0.3, Prophet: 0.1)
+    product_df["anomaly_score"] = (
+        0.3 * product_df["z_anomaly"] +
+        0.3 * product_df["iqr_anomaly"] +
+        0.3 * product_df["iso_anomaly"] +
+        0.1 * product_df["prophet_residual"]
     )
+    
+    # Flag as anomaly if score >= 0.5 (at least 2 methods agree)
+    product_df["is_anomaly"] = product_df["anomaly_score"] >= 0.5
     
     # Calculate deviation
     product_df["deviation_pct"] = ((product_df["sales_qty"] - product_df["expected_sales"]) / (product_df["expected_sales"] + 1e-6)) * 100
     
-    # Severity scoring
-    product_df["severity"] = "normal"
-    product_df.loc[product_df["deviation_pct"].abs() > 50, "severity"] = "severe"
-    product_df.loc[(product_df["deviation_pct"].abs() > 25) & (product_df["deviation_pct"].abs() <= 50), "severity"] = "moderate"
-    product_df.loc[(product_df["deviation_pct"].abs() > 10) & (product_df["deviation_pct"].abs() <= 25), "severity"] = "mild"
+    # Severity scoring (case-insensitive)
+    product_df["severity"] = "Normal"
+    product_df.loc[product_df["deviation_pct"].abs() > 50, "severity"] = "Severe"
+    product_df.loc[(product_df["deviation_pct"].abs() > 25) & (product_df["deviation_pct"].abs() <= 50), "severity"] = "Moderate"
+    product_df.loc[(product_df["deviation_pct"].abs() > 10) & (product_df["deviation_pct"].abs() <= 25), "severity"] = "Mild"
+    
+    # Confidence score (0-100)
+    product_df["confidence"] = (product_df["anomaly_score"] * 100).round(0).clip(0, 100)
     
     # Generate suggested actions
-    product_df["suggested_action"] = "Monitor"
-    product_df.loc[(product_df["is_anomaly"]) & (product_df["deviation_pct"] < -30), "suggested_action"] = "Investigate supply chain / Check stock levels"
-    product_df.loc[(product_df["is_anomaly"]) & (product_df["deviation_pct"] > 30), "suggested_action"] = "Increase inventory / Capitalize on demand surge"
-    product_df.loc[(product_df["is_anomaly"]) & (product_df["severity"] == "severe"), "suggested_action"] = "URGENT: Review pricing strategy & supply"
+    product_df["suggested_action"] = "Monitor closely"
+    product_df.loc[(product_df["is_anomaly"]) & (product_df["deviation_pct"] < -30), "suggested_action"] = "Investigate supply chain / Check stock levels / Consider promotional pricing"
+    product_df.loc[(product_df["is_anomaly"]) & (product_df["deviation_pct"] > 30), "suggested_action"] = "Increase inventory / Capitalize on demand surge / Review pricing strategy"
+    product_df.loc[(product_df["is_anomaly"]) & (product_df["severity"] == "Severe"), "suggested_action"] = "URGENT: Review pricing strategy & supply chain / Escalate to management"
     
     anomalies = product_df[product_df["is_anomaly"]].copy()
     
@@ -86,8 +143,126 @@ def detect_sales_anomalies(df: pd.DataFrame, product_name: str, method: str = "h
         "expected_sales": anomalies["expected_sales"],
         "deviation_pct": anomalies["deviation_pct"].round(2),
         "severity": anomalies["severity"],
-        "suggested_action": anomalies["suggested_action"]
+        "suggested_action": anomalies["suggested_action"],
+        "confidence": anomalies["confidence"]
     })
+
+
+def generate_ai_root_cause_explanation(anomaly_row: pd.Series, product_name: str, 
+                                       context_df: Optional[pd.DataFrame] = None) -> Dict[str, Any]:
+    """
+    AI-driven root cause analysis with GPT-style explanations.
+    Analyzes patterns and generates intelligent insights.
+    """
+    deviation = anomaly_row.get("deviation_pct", 0)
+    severity = anomaly_row.get("severity", "Unknown")
+    date_str = str(anomaly_row.get("date", ""))[:10]
+    confidence = anomaly_row.get("confidence", 50)
+    
+    # Pattern recognition
+    patterns = []
+    if deviation > 50:
+        patterns.append("major sales spike")
+    elif deviation < -50:
+        patterns.append("severe sales drop")
+    elif deviation > 25:
+        patterns.append("significant surge")
+    elif deviation < -25:
+        patterns.append("notable decline")
+    
+    # Determine likely causes based on context
+    likely_causes = []
+    suggested_actions = []
+    
+    if context_df is not None and not context_df.empty:
+        anom_date = pd.to_datetime(anomaly_row.get("date"), errors='coerce')
+        if not pd.isna(anom_date):
+            matching_data = context_df[
+                pd.to_datetime(context_df.get("week_start", context_df.get("date", "")), errors='coerce').dt.date == anom_date.date()
+            ]
+            
+            if not matching_data.empty:
+                # Check price changes
+                if "price" in matching_data.columns:
+                    price_val = matching_data["price"].iloc[0]
+                    if pd.notna(price_val):
+                        if deviation < -20:
+                            likely_causes.append("increased pricing")
+                        elif deviation > 20:
+                            likely_causes.append("price reduction or promotion")
+                
+                # Check stock levels
+                if "stock_on_hand" in matching_data.columns:
+                    stock_val = matching_data["stock_on_hand"].iloc[0]
+                    if pd.notna(stock_val) and stock_val < 50:
+                        likely_causes.append("low inventory levels")
+                
+                # Check promotions
+                if "promotion" in matching_data.columns:
+                    promo_val = matching_data["promotion"].iloc[0]
+                    if pd.notna(promo_val) and promo_val > 0:
+                        likely_causes.append("active promotion campaign")
+                
+                # Check holidays
+                if "holiday_flag" in matching_data.columns:
+                    holiday_val = matching_data["holiday_flag"].iloc[0]
+                    if pd.notna(holiday_val) and holiday_val > 0:
+                        if deviation > 20:
+                            patterns.append("holiday-driven spike")
+                        likely_causes.append("holiday period effect")
+    
+    # Generate explanations
+    if not likely_causes:
+        likely_causes = ["seasonal variation", "market demand shift", "external factors"]
+    
+    cause_text = " and ".join(likely_causes[:2]) if len(likely_causes) >= 2 else likely_causes[0] if likely_causes else "unknown factors"
+    
+    # Generate action recommendations
+    if deviation < -30:
+        suggested_actions = [
+            "Consider promotional pricing to boost demand",
+            "Review supply chain for bottlenecks",
+            "Increase marketing efforts",
+            "Check competitor pricing"
+        ]
+    elif deviation > 30:
+        suggested_actions = [
+            "Increase inventory to meet demand",
+            "Capitalize on opportunity with targeted marketing",
+            "Consider price optimization",
+            "Review supply chain capacity"
+        ]
+    else:
+        suggested_actions = [
+            "Monitor trends closely",
+            "Investigate underlying causes",
+            "Review historical patterns"
+        ]
+    
+    # Generate explanation text
+    pattern_desc = "spike before holidays" if "holiday" in str(likely_causes).lower() else \
+                   "consistent weekly drops" if deviation < -20 else \
+                   "promotional spikes" if "promotion" in str(likely_causes).lower() else \
+                   "significant sales variation"
+    
+    explanation = f"""
+    **{product_name}** experienced a **{abs(deviation):.1f}%** {'surge' if deviation > 0 else 'drop'} in Week {date_str}, 
+    likely linked to **{cause_text}**. This anomaly is classified as **{severity}** severity.
+    
+    **Pattern Recognition:** {pattern_desc}
+    
+    **Recommended Actions:**
+    {chr(10).join([f'• {action}' for action in suggested_actions[:3]])}
+    """
+    
+    return {
+        "explanation": explanation,
+        "likely_causes": likely_causes,
+        "suggested_actions": suggested_actions,
+        "confidence_score": confidence,
+        "pattern_type": pattern_desc,
+        "severity": severity
+    }
 
 
 # ============================================================================

@@ -18,6 +18,12 @@ import numpy as np
 import pandas as pd
 from sklearn.preprocessing import StandardScaler
 from sklearn.metrics import mean_squared_error, mean_absolute_error, r2_score
+from sklearn.model_selection import TimeSeriesSplit
+try:
+    from sklearn.model_selection import GridSearchCV
+    GRIDSEARCH_AVAILABLE = True
+except ImportError:
+    GRIDSEARCH_AVAILABLE = False
 import math
 import json
 import time
@@ -219,6 +225,85 @@ def _create_weekly_features(df: pd.DataFrame) -> pd.DataFrame:
     lag_cols = [c for c in df.columns if c.startswith("lag_")]
     for col in lag_cols:
         df[col] = df[col].fillna(df["sales_qty"].rolling(4, min_periods=1).mean())
+    
+    return df
+
+
+def create_features(df: pd.DataFrame, price_col: Optional[str] = None) -> pd.DataFrame:
+    """
+    Tier-3 comprehensive feature engineering function.
+    Adds date-based, rolling, lag, seasonal, and price elasticity features.
+    Automatically handles missing values with time-based interpolation.
+    
+    Args:
+        df: DataFrame with 'date' and 'sales_qty' columns
+        price_col: Optional column name for price (enables price elasticity features)
+    
+    Returns:
+        DataFrame with comprehensive feature engineering
+    """
+    df = df.copy()
+    df = df.sort_values("date").reset_index(drop=True)
+    
+    # ========== Date-based Features ==========
+    df["year"] = df["date"].dt.year
+    df["month"] = df["date"].dt.month
+    df["week"] = df["date"].dt.isocalendar().week
+    df["day"] = df["date"].dt.day
+    df["dayofweek"] = df["date"].dt.dayofweek
+    df["is_weekend"] = (df["dayofweek"] >= 5).astype(int)
+    df["quarter"] = df["date"].dt.quarter
+    df["dayofyear"] = df["date"].dt.dayofyear
+    
+    # ========== Rolling Window Features ==========
+    for window in [3, 6, 12, 26]:
+        df[f"rolling_mean_{window}"] = df["sales_qty"].rolling(window=window, min_periods=1).mean()
+        df[f"rolling_std_{window}"] = df["sales_qty"].rolling(window=window, min_periods=1).std().fillna(0.0)
+        df[f"rolling_min_{window}"] = df["sales_qty"].rolling(window=window, min_periods=1).min()
+        df[f"rolling_max_{window}"] = df["sales_qty"].rolling(window=window, min_periods=1).max()
+    
+    # ========== Lag Features ==========
+    for lag in [1, 2, 4, 8]:
+        df[f"lag_{lag}"] = df["sales_qty"].shift(lag)
+    
+    # ========== Seasonal Indicators ==========
+    df["is_q1"] = (df["quarter"] == 1).astype(int)
+    df["is_q2"] = (df["quarter"] == 2).astype(int)
+    df["is_q3"] = (df["quarter"] == 3).astype(int)
+    df["is_q4"] = (df["quarter"] == 4).astype(int)
+    
+    # ========== Price Elasticity Features ==========
+    if price_col and price_col in df.columns:
+        df["sales_per_price"] = df["sales_qty"] / (df[price_col] + 1e-6)
+        df["pct_change_sales"] = df["sales_qty"].pct_change().fillna(0.0) * 100
+        df["pct_change_price"] = df[price_col].pct_change().fillna(0.0) * 100
+        df["price_elasticity"] = df["pct_change_sales"] / (df["pct_change_price"] + 1e-6)
+    
+    # ========== Additional Features ==========
+    # Moving average ratios
+    df["ratio_3_6"] = df["rolling_mean_3"] / (df["rolling_mean_6"] + 1e-6)
+    df["ratio_6_12"] = df["rolling_mean_6"] / (df["rolling_mean_12"] + 1e-6)
+    
+    # Volatility
+    df["volatility"] = df["rolling_std_3"] / (df["rolling_mean_3"] + 1e-6)
+    
+    # Cyclical encoding for better seasonality capture
+    df["month_sin"] = np.sin(2 * np.pi * df["month"] / 12)
+    df["month_cos"] = np.cos(2 * np.pi * df["month"] / 12)
+    df["week_sin"] = np.sin(2 * np.pi * df["week"] / 52)
+    df["week_cos"] = np.cos(2 * np.pi * df["week"] / 52)
+    
+    # ========== Fill Missing Values with Time-based Interpolation ==========
+    numeric_cols = df.select_dtypes(include=[np.number]).columns
+    for col in numeric_cols:
+        if col != "sales_qty":  # Don't interpolate target variable
+            df[col] = df[col].interpolate(method="time", limit_direction="both").fillna(method="ffill").fillna(method="bfill").fillna(0.0)
+    
+    # Fill lag features with rolling means if still NaN
+    lag_cols = [c for c in df.columns if c.startswith("lag_")]
+    for col in lag_cols:
+        if df[col].isna().any():
+            df[col] = df[col].fillna(df["sales_qty"].rolling(4, min_periods=1).mean())
     
     return df
 
@@ -603,9 +688,12 @@ def train_ensemble(df: pd.DataFrame, horizon_weeks: int = 156, debug: bool = Fal
     else:
         rmse_scores["prophet"] = np.inf
     
-    # Step 4: Calculate ensemble weights (inverse RMSE)
+    # Step 4: Calculate ensemble weights (Tier-3: Prophet 0.4, XGB 0.3, LGB 0.3)
+    # Use inverse RMSE with base weights as prior
+    base_weights = {"prophet": 0.4, "xgb": 0.3, "lgbm": 0.3}
     weights = {}
     inv_rmse = {}
+    
     for model_name, rmse in rmse_scores.items():
         if rmse != np.inf and not np.isnan(rmse) and rmse > 0:
             inv_rmse[model_name] = 1.0 / (rmse + 1e-6)
@@ -614,11 +702,20 @@ def train_ensemble(df: pd.DataFrame, horizon_weeks: int = 156, debug: bool = Fal
     
     total_inv = sum(inv_rmse.values())
     if total_inv > 0:
+        # Blend inverse RMSE with base weights (60% performance, 40% base)
         for model_name in rmse_scores.keys():
-            weights[model_name] = inv_rmse[model_name] / total_inv
+            performance_weight = inv_rmse[model_name] / total_inv
+            base_weight = base_weights.get(model_name, 0.0)
+            # Blend: 60% performance-based, 40% base weight
+            weights[model_name] = 0.6 * performance_weight + 0.4 * base_weight
+        
+        # Renormalize to ensure sum = 1.0
+        total_w = sum(weights.values())
+        if total_w > 0:
+            weights = {k: v / total_w for k, v in weights.items()}
     else:
-        # Fallback: equal weights
-        weights = {"prophet": 0.4, "xgb": 0.3, "lgbm": 0.3}
+        # Fallback: use base weights
+        weights = base_weights.copy()
         for model_name in ["prophet", "xgb", "lgbm"]:
             if model_name not in rmse_scores or rmse_scores[model_name] == np.inf:
                 weights[model_name] = 0.0
@@ -1610,3 +1707,347 @@ def run_advanced_forecast(
         "anomaly_flags": anomaly_flags,
         "saved_path": forecast_file
     }
+
+
+# ========================================================================
+# Tier-3 Evaluation and Cross-Validation Functions
+# ========================================================================
+
+def evaluate_models(y_true: np.ndarray, y_pred_dict: Dict[str, np.ndarray]) -> Tuple[pd.DataFrame, Dict[str, Dict[str, float]]]:
+    """
+    Comprehensive model evaluation function.
+    Computes RMSE, MAE, MAPE, and R² for all models and ensemble.
+    
+    Args:
+        y_true: Actual values
+        y_pred_dict: Dictionary of model_name -> predicted values
+    
+    Returns:
+        Tuple of (metrics_df, metrics_dict)
+    """
+    metrics_list = []
+    metrics_dict = {}
+    
+    for model_name, y_pred in y_pred_dict.items():
+        if len(y_true) != len(y_pred):
+            logger.warning(f"Skipping {model_name}: Length mismatch")
+            continue
+        
+        # Remove any NaN or inf values
+        mask = np.isfinite(y_true) & np.isfinite(y_pred)
+        y_true_clean = y_true[mask]
+        y_pred_clean = y_pred[mask]
+        
+        if len(y_true_clean) == 0:
+            logger.warning(f"Skipping {model_name}: No valid predictions")
+            continue
+        
+        # Compute metrics
+        rmse = math.sqrt(mean_squared_error(y_true_clean, y_pred_clean))
+        mae = mean_absolute_error(y_true_clean, y_pred_clean)
+        mape_val = mape(y_true_clean, y_pred_clean)
+        try:
+            r2_val = r2_score(y_true_clean, y_pred_clean)
+        except:
+            r2_val = np.nan
+        
+        metrics_list.append({
+            "Model": model_name,
+            "RMSE": rmse,
+            "MAE": mae,
+            "MAPE": mape_val,
+            "R²": r2_val
+        })
+        
+        metrics_dict[model_name] = {
+            "rmse": rmse,
+            "mae": mae,
+            "mape": mape_val,
+            "r2": r2_val
+        }
+    
+    metrics_df = pd.DataFrame(metrics_list)
+    return metrics_df, metrics_dict
+
+
+def cross_validate_models(df: pd.DataFrame, horizon_weeks: int = 12, n_splits: int = 5, 
+                          fast_mode: bool = True, deep_tune: bool = False) -> Dict[str, Any]:
+    """
+    5-Fold Time Series Cross-Validation for model evaluation.
+    
+    Args:
+        df: Input dataframe with 'date' and 'sales_qty'
+        horizon_weeks: Forecast horizon
+        n_splits: Number of CV folds (default: 5)
+        fast_mode: Use faster models
+        deep_tune: Enable hyperparameter tuning with GridSearchCV
+    
+    Returns:
+        Dictionary with CV metrics and results
+    """
+    logger.info(f"Starting {n_splits}-fold time series cross-validation...")
+    
+    # Preprocess data
+    df_weekly = _preprocess_weekly_data(df)
+    df_weekly = _create_weekly_features(df_weekly)
+    
+    # Prepare features
+    exclude = {"date", "sales_qty"}
+    feature_cols = [c for c in df_weekly.columns if c not in exclude]
+    X_all = df_weekly[feature_cols].fillna(method="ffill").fillna(method="bfill").fillna(0.0)
+    y_all = df_weekly["sales_qty"].values
+    
+    if len(X_all) < n_splits * horizon_weeks + 20:
+        logger.warning(f"Insufficient data for {n_splits}-fold CV. Using {max(2, len(X_all) // (horizon_weeks + 10))} folds")
+        n_splits = max(2, len(X_all) // (horizon_weeks + 10))
+    
+    # Time series split (respects temporal order)
+    tscv = TimeSeriesSplit(n_splits=n_splits)
+    
+    cv_results = {
+        "prophet_rmse": [],
+        "prophet_mae": [],
+        "prophet_mape": [],
+        "prophet_r2": [],
+        "xgb_rmse": [],
+        "xgb_mae": [],
+        "xgb_mape": [],
+        "xgb_r2": [],
+        "lgbm_rmse": [],
+        "lgbm_mae": [],
+        "lgbm_mape": [],
+        "lgbm_r2": [],
+        "ensemble_rmse": [],
+        "ensemble_mae": [],
+        "ensemble_mape": [],
+        "ensemble_r2": []
+    }
+    
+    fold = 0
+    for train_idx, test_idx in tscv.split(X_all):
+        fold += 1
+        logger.info(f"Processing fold {fold}/{n_splits}...")
+        
+        X_train_cv = X_all.iloc[train_idx].values
+        y_train_cv = y_all[train_idx]
+        X_test_cv = X_all.iloc[test_idx].values
+        y_test_cv = y_all[test_idx]
+        
+        # Scale features
+        scaler = StandardScaler()
+        X_train_scaled = scaler.fit_transform(X_train_cv)
+        X_test_scaled = scaler.transform(X_test_cv)
+        
+        # Train models
+        y_pred_dict = {}
+        
+        # Prophet (use historical data subset)
+        hist_df = df_weekly.iloc[train_idx][["date", "sales_qty"]].copy()
+        hist_prophet, fut_prophet, _, _ = _fit_prophet(hist_df, horizon_weeks=min(len(test_idx), horizon_weeks), debug=False)
+        if hist_prophet is not None and len(hist_prophet) >= len(test_idx):
+            y_pred_dict["Prophet"] = hist_prophet["yhat"].values[:len(test_idx)]
+        else:
+            # Fallback: use mean
+            y_pred_dict["Prophet"] = np.full(len(test_idx), y_train_cv.mean())
+        
+        # XGBoost
+        try:
+            xgb_model = _fit_xgb(X_train_scaled, y_train_cv, fast_mode=fast_mode)
+            y_pred_xgb = xgb_model.predict(xgb.DMatrix(X_test_scaled))
+            y_pred_dict["XGBoost"] = y_pred_xgb
+        except:
+            y_pred_dict["XGBoost"] = np.full(len(test_idx), y_train_cv.mean())
+        
+        # LightGBM
+        try:
+            lgb_model = _fit_lgb(X_train_scaled, y_train_cv, fast_mode=fast_mode)
+            y_pred_lgb = lgb_model.predict(X_test_scaled)
+            y_pred_dict["LightGBM"] = y_pred_lgb
+        except:
+            y_pred_dict["LightGBM"] = np.full(len(test_idx), y_train_cv.mean())
+        
+        # Ensemble (Prophet 0.4 + XGB 0.3 + LGB 0.3)
+        ensemble_pred = (
+            0.4 * y_pred_dict["Prophet"] +
+            0.3 * y_pred_dict["XGBoost"] +
+            0.3 * y_pred_dict["LightGBM"]
+        )
+        y_pred_dict["Ensemble"] = ensemble_pred
+        
+        # Evaluate
+        metrics_df, metrics_dict = evaluate_models(y_test_cv, y_pred_dict)
+        
+        # Store results
+        for model_name in ["Prophet", "XGBoost", "LightGBM", "Ensemble"]:
+            model_lower = model_name.lower().replace("prophet", "prophet")
+            if model_name in metrics_dict:
+                cv_results[f"{model_lower}_rmse"].append(metrics_dict[model_name]["rmse"])
+                cv_results[f"{model_lower}_mae"].append(metrics_dict[model_name]["mae"])
+                cv_results[f"{model_lower}_mape"].append(metrics_dict[model_name]["mape"])
+                cv_results[f"{model_lower}_r2"].append(metrics_dict[model_name]["r2"])
+    
+    # Compute average metrics
+    avg_metrics = {}
+    for key in cv_results.keys():
+        if len(cv_results[key]) > 0:
+            avg_metrics[f"avg_{key}"] = np.mean(cv_results[key])
+            avg_metrics[f"std_{key}"] = np.std(cv_results[key])
+    
+    logger.info("Cross-validation completed!")
+    return {
+        "cv_results": cv_results,
+        "average_metrics": avg_metrics,
+        "n_splits": n_splits
+    }
+
+
+# ========================================================================
+# Tier-3 Visualization Functions
+# ========================================================================
+
+def plot_forecast_results(history_df: pd.DataFrame, forecast_df: pd.DataFrame, 
+                         prophet_components: Optional[pd.DataFrame] = None,
+                         title: str = "Sales Forecast") -> Dict[str, Any]:
+    """
+    Create comprehensive forecast visualization plots.
+    
+    Returns dictionary with Plotly figure objects for:
+    - Main forecast with confidence intervals
+    - Residual plot
+    - Forecast decomposition (if Prophet components available)
+    """
+    try:
+        import plotly.graph_objects as go
+        from plotly.subplots import make_subplots
+    except ImportError:
+        logger.warning("Plotly not available for visualization")
+        return {}
+    
+    figures = {}
+    
+    # 1. Main Forecast Plot with Confidence Intervals
+    fig_main = go.Figure()
+    
+    # Historical data
+    if "sales_qty" in history_df.columns:
+        fig_main.add_trace(go.Scatter(
+            x=history_df["date"],
+            y=history_df["sales_qty"],
+            name="Historical",
+            mode="lines+markers",
+            line=dict(color="#1f77b4", width=2),
+            marker=dict(size=5)
+        ))
+    
+    # Forecast
+    if "yhat" in forecast_df.columns:
+        fig_main.add_trace(go.Scatter(
+            x=forecast_df["date"],
+            y=forecast_df["yhat"],
+            name="Forecast",
+            mode="lines",
+            line=dict(color="#ff7f0e", width=3)
+        ))
+        
+        # 80% Confidence Interval
+        if "yhat_lower" in forecast_df.columns and "yhat_upper" in forecast_df.columns:
+            fig_main.add_trace(go.Scatter(
+                x=pd.concat([forecast_df["date"], forecast_df["date"][::-1]]),
+                y=pd.concat([forecast_df["yhat_upper"], forecast_df["yhat_lower"][::-1]]),
+                fill='toself',
+                fillcolor='rgba(255, 127, 14, 0.2)',
+                line=dict(color='rgba(255,255,255,0)'),
+                name='80% CI',
+                showlegend=True,
+                hoverinfo='skip'
+            ))
+        
+        # 95% Confidence Interval
+        if "yhat_lower_95" in forecast_df.columns and "yhat_upper_95" in forecast_df.columns:
+            fig_main.add_trace(go.Scatter(
+                x=pd.concat([forecast_df["date"], forecast_df["date"][::-1]]),
+                y=pd.concat([forecast_df["yhat_upper_95"], forecast_df["yhat_lower_95"][::-1]]),
+                fill='toself',
+                fillcolor='rgba(255, 127, 14, 0.1)',
+                line=dict(color='rgba(255,255,255,0)'),
+                name='95% CI',
+                showlegend=True,
+                hoverinfo='skip'
+            ))
+    
+    fig_main.update_layout(
+        title=title,
+        xaxis_title="Date",
+        yaxis_title="Sales Quantity",
+        template="plotly_white",
+        height=500,
+        hovermode='x unified'
+    )
+    figures["forecast"] = fig_main
+    
+    # 2. Residual Plot (if we have historical fitted values)
+    if "yhat" in history_df.columns or "fitted" in history_df.columns:
+        fitted_col = "yhat" if "yhat" in history_df.columns else "fitted"
+        residuals = history_df["sales_qty"] - history_df[fitted_col]
+        
+        fig_residual = go.Figure()
+        fig_residual.add_trace(go.Scatter(
+            x=history_df["date"],
+            y=residuals,
+            mode="markers",
+            name="Residuals",
+            marker=dict(color="#d62728", size=6)
+        ))
+        fig_residual.add_hline(y=0, line_dash="dash", line_color="gray", annotation_text="Zero Line")
+        
+        fig_residual.update_layout(
+            title="Residual Analysis (Predicted vs Actual)",
+            xaxis_title="Date",
+            yaxis_title="Residuals (Actual - Predicted)",
+            template="plotly_white",
+            height=400
+        )
+        figures["residual"] = fig_residual
+    
+    # 3. Forecast Decomposition (if Prophet components available)
+    if prophet_components is not None and not prophet_components.empty:
+        fig_decomp = make_subplots(
+            rows=4, cols=1,
+            subplot_titles=("Trend", "Yearly Seasonality", "Quarterly Seasonality", "Weekly Seasonality"),
+            vertical_spacing=0.08,
+            row_heights=[0.4, 0.2, 0.2, 0.2]
+        )
+        
+        if "trend" in prophet_components.columns:
+            fig_decomp.add_trace(
+                go.Scatter(x=prophet_components["ds"], y=prophet_components["trend"], name="Trend"),
+                row=1, col=1
+            )
+        
+        if "yearly" in prophet_components.columns:
+            fig_decomp.add_trace(
+                go.Scatter(x=prophet_components["ds"], y=prophet_components["yearly"], name="Yearly"),
+                row=2, col=1
+            )
+        
+        if "quarterly" in prophet_components.columns:
+            fig_decomp.add_trace(
+                go.Scatter(x=prophet_components["ds"], y=prophet_components["quarterly"], name="Quarterly"),
+                row=3, col=1
+            )
+        
+        if "weekly" in prophet_components.columns:
+            fig_decomp.add_trace(
+                go.Scatter(x=prophet_components["ds"], y=prophet_components["weekly"], name="Weekly"),
+                row=4, col=1
+            )
+        
+        fig_decomp.update_layout(
+            title="Forecast Decomposition (Trend + Seasonality)",
+            height=800,
+            template="plotly_white",
+            showlegend=False
+        )
+        figures["decomposition"] = fig_decomp
+    
+    return figures

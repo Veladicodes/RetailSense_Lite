@@ -4,8 +4,219 @@ import numpy as np
 import os
 from datetime import datetime
 import warnings
+import streamlit as st
+from typing import Dict, Optional, Tuple, Any
+import difflib
+
 warnings.filterwarnings('ignore')
 
+
+def load_csv_bytes(file_obj) -> pd.DataFrame:
+    """
+    Read CSV from file object, handle duplicate headers, and normalize column names.
+    
+    Args:
+        file_obj: File-like object (e.g., from st.file_uploader)
+    
+    Returns:
+        pd.DataFrame: DataFrame with normalized and deduplicated column names
+    """
+    try:
+        # Reset file pointer
+        file_obj.seek(0)
+        
+        # Read CSV with parse_dates=False initially (we'll parse after mapping)
+        df = pd.read_csv(file_obj, parse_dates=False, low_memory=False, encoding='utf-8')
+        
+        # Handle duplicate headers
+        df = dedupe_columns(df)
+        
+        # Normalize column names
+        df = normalize_columns(df)
+        
+        # Store in session state
+        st.session_state['raw_df'] = df.copy()
+        
+        return df
+    except Exception as e:
+        st.error(f"Error loading CSV: {e}")
+        return pd.DataFrame()
+
+
+def normalize_columns(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Normalize column names: lowercase, strip whitespace, replace spaces with underscores.
+    
+    Args:
+        df: Input DataFrame
+    
+    Returns:
+        pd.DataFrame: DataFrame with normalized column names
+    """
+    df = df.copy()
+    
+    # Normalize: lowercase, strip, replace spaces with underscores
+    df.columns = (
+        df.columns
+        .str.lower()
+        .str.strip()
+        .str.replace(' ', '_')
+        .str.replace('-', '_')
+        .str.replace('/', '_')
+    )
+    
+    # Ensure unique column names after normalization
+    df.columns = _make_unique_columns(df.columns)
+    
+    return df
+
+
+def dedupe_columns(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Rename duplicate column names by appending suffix _dup1, _dup2, etc.
+    
+    Args:
+        df: Input DataFrame (may have duplicate column names)
+    
+    Returns:
+        pd.DataFrame: DataFrame with unique column names
+    """
+    df = df.copy()
+    
+    if df.columns.duplicated().any():
+        seen = {}
+        new_columns = []
+        
+        for col in df.columns:
+            if col in seen:
+                seen[col] += 1
+                new_col = f"{col}_dup{seen[col]}"
+                new_columns.append(new_col)
+            else:
+                seen[col] = 0
+                new_columns.append(col)
+        
+        df.columns = new_columns
+    
+    return df
+
+
+def _make_unique_columns(columns: pd.Index) -> pd.Index:
+    """
+    Ensure all column names are unique by appending incremental suffix if needed.
+    
+    Args:
+        columns: pandas Index of column names
+    
+    Returns:
+        pd.Index: Index with unique column names
+    """
+    seen = {}
+    new_columns = []
+    
+    for col in columns:
+        if col in seen:
+            seen[col] += 1
+            new_columns.append(f"{col}_{seen[col]}")
+        else:
+            seen[col] = 0
+            new_columns.append(col)
+    
+    return pd.Index(new_columns)
+
+
+@st.cache_data
+def get_quick_summary(df: pd.DataFrame, date_col: Optional[str] = None) -> Dict[str, Any]:
+    """
+    Generate quick summary of dataset.
+    
+    Args:
+        df: Input DataFrame
+        date_col: Optional column name for date (to compute date range)
+    
+    Returns:
+        dict: Summary with keys: rows, cols, date_range, n_products, top_categories
+    """
+    summary = {
+        'rows': len(df),
+        'cols': len(df.columns),
+        'date_range': None,
+        'n_products': 0,
+        'top_categories': []
+    }
+    
+    # Try to detect date column if not provided
+    if date_col is None:
+        date_candidates = [c for c in df.columns if any(
+            term in c.lower() for term in ['date', 'time', 'week', 'day', 'ds']
+        )]
+        if date_candidates:
+            date_col = date_candidates[0]
+    
+    # Parse date range if date column available
+    if date_col and date_col in df.columns:
+        try:
+            dates = pd.to_datetime(df[date_col], errors='coerce')
+            valid_dates = dates.dropna()
+            if len(valid_dates) > 0:
+                min_date = valid_dates.min()
+                max_date = valid_dates.max()
+                summary['date_range'] = (
+                    min_date.strftime('%Y-%m-%d'),
+                    max_date.strftime('%Y-%m-%d')
+                )
+        except Exception:
+            pass
+    
+    # Detect product column
+    product_candidates = [c for c in df.columns if any(
+        term in c.lower() for term in ['product', 'item', 'sku', 'name']
+    )]
+    if product_candidates:
+        product_col = product_candidates[0]
+        try:
+            summary['n_products'] = df[product_col].nunique()
+        except Exception:
+            pass
+    
+    # Detect category column
+    category_candidates = [c for c in df.columns if any(
+        term in c.lower() for term in ['category', 'department', 'aisle', 'class']
+    )]
+    if category_candidates:
+        category_col = category_candidates[0]
+        try:
+            top_cats = df[category_col].value_counts().head(5).index.tolist()
+            summary['top_categories'] = [str(c) for c in top_cats]
+        except Exception:
+            pass
+    
+    return summary
+
+
+def validate_mapping(mapping: Dict[str, str], df: pd.DataFrame) -> Tuple[bool, list]:
+    """
+    Validate that required columns (date, product, sales_qty) are mapped.
+    
+    Args:
+        mapping: Dictionary mapping canonical names to actual column names
+        df: DataFrame to validate against
+    
+    Returns:
+        tuple: (is_valid, missing_columns_list)
+    """
+    required = ['date', 'product', 'sales_qty']
+    missing = []
+    
+    for req_col in required:
+        mapped_col = mapping.get(req_col)
+        if not mapped_col or mapped_col not in df.columns:
+            missing.append(req_col)
+    
+    return len(missing) == 0, missing
+
+
+# Legacy functions for backward compatibility
 class RetailDataLoader:
     """
     Retail Data Loader for Market Dataset.
@@ -66,109 +277,3 @@ def preprocess_data(df):
     except Exception as e:
         print(f"Error preprocessing data: {e}")
         return df
-
-        # Convert date columns
-        self.df['week_start'] = pd.to_datetime(self.df['week_start'], errors='coerce')
-        self.df['week_end'] = pd.to_datetime(self.df['week_end'], errors='coerce')
-
-        if 'expiry_date' in self.df.columns:
-            self.df['expiry_date'] = pd.to_datetime(self.df['expiry_date'], errors='coerce')
-
-        print(f"✅ Data loaded: {self.df.shape[0]} rows, {self.df.shape[1]} columns")
-        return self.df
-
-    def validate_data(self):
-        """Validate dataset for missing values, negatives, and anomalies"""
-        print("🔎 Validating dataset...")
-
-        missing = self.df.isnull().sum()
-        if missing.sum() > 0:
-            print("⚠️ Missing values detected:\n", missing[missing > 0])
-        else:
-            print("✅ No missing values")
-
-        if (self.df['sales_qty'] < 0).any():
-            print("⚠️ Warning: Negative sales values detected!")
-
-        if (self.df['price'] < 0).any():
-            print("⚠️ Warning: Negative prices detected!")
-
-        if 'stock_on_hand' in self.df.columns and (self.df['stock_on_hand'] < 0).any():
-            print("⚠️ Warning: Negative stock values detected!")
-
-        print("✅ Data validation complete")
-        return True
-
-    def create_time_features(self):
-        """Create time-based and expiry-based features for modeling"""
-        print("⏳ Creating time features...")
-
-        # Basic time features
-        self.df['year'] = self.df['week_start'].dt.year
-        self.df['month'] = self.df['week_start'].dt.month
-        self.df['week_of_year'] = self.df['week_start'].dt.isocalendar().week.astype(int)
-        self.df['quarter'] = self.df['week_start'].dt.quarter
-        self.df['is_month_end'] = self.df['week_end'].dt.is_month_end.astype(int)
-
-        # Days until expiry (if applicable)
-        if 'expiry_date' in self.df.columns:
-            self.df['days_to_expiry'] = (self.df['expiry_date'] - self.df['week_start']).dt.days
-            self.df['days_to_expiry'] = self.df['days_to_expiry'].fillna(365)
-            self.df['near_expiry'] = (self.df['days_to_expiry'] <= 7).astype(int)
-
-        # Price and availability features
-        self.df['price_per_unit'] = self.df['price'] / self.df['sales_qty'].replace(0, 1)
-        self.df['stock_sales_ratio'] = self.df['stock_on_hand'] / self.df['sales_qty'].replace(0, 1)
-
-        print("✅ Time features created")
-        return self.df
-
-    def get_product_series(self, product_id, store_id=None):
-        """
-        Get time series for specific product.
-        If store_id is provided -> return product-store series.
-        If not -> aggregate across all stores.
-        """
-        print(f"📊 Extracting series for product {product_id} {'(store ' + str(store_id) + ')' if store_id else '(all stores)'}")
-
-        if store_id:
-            series_data = self.df[
-                (self.df['product_id'] == product_id) & 
-                (self.df['store_id'] == store_id)
-            ].copy()
-        else:
-            # Aggregate across all stores
-            series_data = self.df[self.df['product_id'] == product_id].copy()
-            series_data = series_data.groupby('week_start').agg({
-                'sales_qty': 'sum',
-                'stock_on_hand': 'sum',
-                'price': 'mean',
-                'promotion': 'max',
-                'holiday_flag': 'max'
-            }).reset_index()
-
-        series_data = series_data.sort_values('week_start')
-        print(f"✅ Series extracted: {series_data.shape[0]} records")
-        return series_data
-
-    def save_processed_data(self, out_path="data/processed/market_processed.csv"):
-        """Save the cleaned & feature-enriched dataset"""
-        self.df.to_csv(out_path, index=False)
-        print(f"💾 Processed data saved at {out_path}")
-
-
-# Example usage (for testing directly)
-if __name__ == "__main__":
-    loader = RetailDataLoader("data/market.csv")
-    df = loader.load_data()
-    loader.validate_data()
-    df = loader.create_time_features()
-
-    # Print basic info
-    print("\n📈 Dataset Info:")
-    print(f"Date range: {df['week_start'].min()} to {df['week_start'].max()}")
-    print(f"Unique products: {df['product_id'].nunique()}")
-    print(f"Unique stores: {df['store_id'].nunique()}")
-    print(f"Categories: {df['category'].unique()}")
-
-    loader.save_processed_data()
