@@ -9,6 +9,7 @@ import sys
 import subprocess
 import argparse
 from datetime import datetime
+import io
 
 # Ensure UTF-8 capable output (prevents UnicodeEncodeError on Windows terminals)
 try:
@@ -141,11 +142,28 @@ def launch_dashboard():
     print("📱 Dashboard will open at: http://localhost:8501\n")
 
     try:
-        subprocess.run([sys.executable, "-m", "streamlit", "run", "app.py", "--server.headless=false"])
+        # Use UTF-8 encoding for subprocess output to avoid UnicodeDecodeError
+        env = os.environ.copy()
+        env['PYTHONIOENCODING'] = 'utf-8'
+        env['PYTHONLEGACYWINDOWSSTDIO'] = '0'  # Disable legacy Windows stdio
+        
+        # Redirect stdout/stderr to DEVNULL to avoid encoding issues with background threads
+        # Streamlit will still open its own browser window and handle UI output
+        with open(os.devnull, 'w', encoding='utf-8', errors='replace') as devnull:
+            subprocess.run(
+                [sys.executable, "-m", "streamlit", "run", "app.py", "--server.headless=false"],
+                env=env,
+                stdout=devnull,
+                stderr=devnull,
+                check=False
+            )
+            
     except KeyboardInterrupt:
         print("\n👋 Dashboard stopped by user")
     except Exception as e:
         print(f"❌ Error launching dashboard: {e}")
+        import traceback
+        print(traceback.format_exc())
 
 
 # -------------------------------

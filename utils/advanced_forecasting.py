@@ -1513,7 +1513,7 @@ def run_hybrid_forecast(df, product=None, horizon_weeks=12, end_date=None, model
     
     return result
 
-def simulate_forecast_with_scenarios(df, horizon_weeks=12, scenarios=None):
+def simulate_forecast_scenarios(df, horizon_weeks=12, scenarios=None):
     """
     Generate forecast scenarios based on different assumptions.
     
