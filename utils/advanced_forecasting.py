@@ -145,7 +145,7 @@ def _preprocess_weekly_data(df: pd.DataFrame, date_col: str = "week_start", targ
     if zero_mask.sum() > 0:
         # If more than 50% are zeros, use forward fill; otherwise interpolate
         if zero_mask.sum() / len(df) > 0.5:
-            df["sales_qty"] = df["sales_qty"].replace(0, np.nan).fillna(method="ffill").fillna(method="bfill")
+            df["sales_qty"] = df["sales_qty"].replace(0, np.nan).ffill().bfill()
         else:
             # Interpolate isolated zeros
             df["sales_qty"] = df["sales_qty"].replace(0, np.nan)
@@ -297,7 +297,7 @@ def create_features(df: pd.DataFrame, price_col: Optional[str] = None) -> pd.Dat
     numeric_cols = df.select_dtypes(include=[np.number]).columns
     for col in numeric_cols:
         if col != "sales_qty":  # Don't interpolate target variable
-            df[col] = df[col].interpolate(method="time", limit_direction="both").fillna(method="ffill").fillna(method="bfill").fillna(0.0)
+            df[col] = df[col].interpolate(method="time", limit_direction="both").ffill().bfill().fillna(0.0)
     
     # Fill lag features with rolling means if still NaN
     lag_cols = [c for c in df.columns if c.startswith("lag_")]
@@ -592,7 +592,7 @@ def train_ensemble(df: pd.DataFrame, horizon_weeks: int = 156, debug: bool = Fal
         raise ValueError(f"Insufficient clean data for ML: {len(feat_df_clean)} rows. Need ≥10.")
     
     # Fill remaining NaN in features
-    X_all = feat_df_clean[feature_cols].fillna(method="ffill").fillna(method="bfill").fillna(0.0)
+    X_all = feat_df_clean[feature_cols].ffill().bfill().fillna(0.0)
     y_all = feat_df_clean["sales_qty"].values
     
     # Train/validation split (85/15)
@@ -728,7 +728,7 @@ def train_ensemble(df: pd.DataFrame, horizon_weeks: int = 156, debug: bool = Fal
     logger.info(f"Ensemble weights: {weights}")
     
     # Step 5: Generate in-sample predictions for metrics
-    X_all_scaled = scaler.transform(X_all.fillna(method="ffill").fillna(method="bfill").fillna(0.0))
+    X_all_scaled = scaler.transform(X_all.ffill().bfill().fillna(0.0))
     
     in_sample_preds = {}
     
@@ -853,7 +853,7 @@ def train_ensemble(df: pd.DataFrame, horizon_weeks: int = 156, debug: bool = Fal
             try:
                 row = build_future_features(recursive_history, current_date)
                 X_row = pd.DataFrame([row])[feature_cols]
-                X_row = X_row.fillna(method="ffill").fillna(method="bfill").fillna(0.0)
+                X_row = X_row.ffill().bfill().fillna(0.0)
                 X_row_scaled = scaler.transform(X_row.values)
                 
                 if ml_models.get("xgb") is not None:
@@ -1794,7 +1794,7 @@ def cross_validate_models(df: pd.DataFrame, horizon_weeks: int = 12, n_splits: i
     # Prepare features
     exclude = {"date", "sales_qty"}
     feature_cols = [c for c in df_weekly.columns if c not in exclude]
-    X_all = df_weekly[feature_cols].fillna(method="ffill").fillna(method="bfill").fillna(0.0)
+    X_all = df_weekly[feature_cols].ffill().bfill().fillna(0.0)
     y_all = df_weekly["sales_qty"].values
     
     if len(X_all) < n_splits * horizon_weeks + 20:

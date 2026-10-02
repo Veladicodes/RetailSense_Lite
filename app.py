@@ -398,7 +398,7 @@ def preprocess_for_forecasting(ts: pd.DataFrame) -> pd.DataFrame:
     df = df_complete.merge(df, on="date", how="left")
     
     # Forward fill for sales (carry last known value)
-    df["sales_qty"] = df["sales_qty"].fillna(method="ffill").fillna(method="bfill").fillna(0)
+    df["sales_qty"] = df["sales_qty"].ffill().bfill().fillna(0)
     
     # 3. Apply light smoothing to reduce high-frequency noise (7-day moving average)
     df["sales_smooth"] = df["sales_qty"].rolling(window=7, center=True, min_periods=1).mean()
@@ -409,9 +409,9 @@ def preprocess_for_forecasting(ts: pd.DataFrame) -> pd.DataFrame:
     
     # 5. Handle other columns
     if "price" in df.columns:
-        df["price"] = df["price"].fillna(method="ffill").fillna(df["price"].median())
+        df["price"] = df["price"].ffill().fillna(df["price"].median())
     if "stock_on_hand" in df.columns:
-        df["stock_on_hand"] = df["stock_on_hand"].fillna(method="ffill").fillna(0)
+        df["stock_on_hand"] = df["stock_on_hand"].ffill().fillna(0)
     if "promotion_flag" in df.columns:
         df["promotion_flag"] = df["promotion_flag"].fillna(0)
     if "holiday_flag" in df.columns:
@@ -5406,7 +5406,7 @@ with tab5:
                             
                             # Aggregate by week
                             weekly_sales = product_df.groupby("week_start")["sales_qty"].sum().resample("W").mean()
-                            weekly_sales = weekly_sales.fillna(method="ffill").fillna(method="bfill")
+                            weekly_sales = weekly_sales.ffill().bfill()
                             
                             if len(weekly_sales) >= 52:
                                 # STL Decomposition

@@ -42,7 +42,7 @@ def detect_sales_anomalies(df: pd.DataFrame, product_name: str, method: str = "h
     # Calculate expected sales (rolling mean with seasonality)
     window = min(8, len(product_df) // 2)
     product_df["expected_sales"] = product_df["sales_qty"].rolling(window=window, center=True).mean()
-    product_df["expected_sales"] = product_df["expected_sales"].fillna(method="ffill").fillna(method="bfill")
+    product_df["expected_sales"] = product_df["expected_sales"].ffill().bfill()
     
     # Method 1: Z-Score (Adaptive threshold based on volatility)
     mean_sales = product_df["sales_qty"].mean()

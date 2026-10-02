@@ -4,6 +4,7 @@
 
 **Retail demand forecasting, anomaly detection and pricing intelligence in one Streamlit dashboard.**
 
+[![CI](https://github.com/Veladicodes/RetailSense_Lite/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/Veladicodes/RetailSense_Lite/actions/workflows/ci.yml)
 ![Python](https://img.shields.io/badge/Python-3.8+-3776AB?logo=python&logoColor=white)
 ![Streamlit](https://img.shields.io/badge/Streamlit-dashboard-FF4B4B?logo=streamlit&logoColor=white)
 ![XGBoost](https://img.shields.io/badge/XGBoost-ensemble-EB6C00)
